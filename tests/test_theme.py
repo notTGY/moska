@@ -35,21 +35,39 @@ class ThemeTests(unittest.TestCase):
         canvas = self.attrs('')
         self.assertEqual((canvas.color, canvas.bgcolor), ('ffffff', '161c27'))
         for role, color in (
-            ('brand', '2fbead'), ('agent', '2fbead'), ('moska', '2fbead'),
-            ('markdown-heading', '2fbead'), ('accent', '84e0d5'),
-            ('muted', '909393'), ('markdown-quote', '909393'),
-            ('link', '92c7ff'), ('system', 'ffffff'), ('markdown-code', '84e0d5'),
-            ('markdown-strong', '3debcb'), ('markdown-emphasis', '84e0d5'),
+            ('brand', '2fbead'), ('agent', '3debcb'), ('moska', '2fbead'),
+            ('you', 'd1a684'), ('tool', '92c7ff'), ('agents', '92c7ff'),
+            ('markdown-heading', '92c7ff'), ('accent', '84e0d5'),
+            ('muted', '909393'), ('markdown-quote', 'e9e3d8'),
+            ('link', '92c7ff'), ('system', 'e8d5c4'), ('markdown-code', '84e0d5'),
+            ('markdown-strong', '3debcb'), ('markdown-emphasis', 'd1a684'),
+            ('process-summary', '92c7ff'), ('process-label', 'e8d5c4'),
+            ('process-pending', 'd1a684'), ('process-running', '3debcb'),
+            ('process-workspace', '84e0d5'),
         ):
             with self.subTest(role=role):
-                self.assertEqual(self.attrs('class:' + role).color, color)
+                attrs = self.attrs('class:' + role)
+                self.assertEqual(attrs.color, color)
+                self.assertGreaterEqual(contrast(attrs.color, attrs.bgcolor), 4.5)
         self.assertTrue(self.attrs('class:brand').bold)
         self.assertTrue(self.attrs('class:link').underline)
         self.assertTrue(self.attrs('class:markdown-quote').italic)
 
+    def test_process_fields_stay_readable_when_selected(self):
+        for role in ('process-summary', 'agent', 'process-label', 'process-pending',
+                     'process-running', 'process-workspace'):
+            with self.subTest(role=role):
+                attrs = self.attrs('class:' + role + ' class:selected-text')
+                self.assertEqual((attrs.color, attrs.bgcolor), ('ffffff', '005a60'))
+                self.assertFalse(attrs.reverse)
+                self.assertGreaterEqual(contrast(attrs.color, attrs.bgcolor), 4.5)
+
     def test_interactive_surfaces_keep_readable_brand_colors(self):
         for classes, background in (
             ('class:composer', '24332f'),
+            ('class:composer class:composer-prompt', '24332f'),
+            ('class:status', '005a60'),
+            ('class:status class:status-count', '005a60'),
             ('class:completion-menu.completion', '005a60'),
             ('class:completion-menu.meta.completion', '005a60'),
             ('class:completion-menu.completion.current', '066d74'),
@@ -86,10 +104,10 @@ class ThemeTests(unittest.TestCase):
         for text, color, bold, italic in (
             ('Plain ', 'ffffff', False, False),
             ('**strong**', '3debcb', True, False),
-            ('*emphasis*', '84e0d5', False, True),
+            ('*emphasis*', 'd1a684', False, True),
             ('`inline`', '84e0d5', False, False),
-            ('# Heading\n', '2fbead', True, False),
-            ('> Quote\n', '909393', False, True),
+            ('# Heading\n', '92c7ff', True, False),
+            ('> Quote\n', 'e9e3d8', False, True),
             ('```python\n', '84e0d5', False, False),
             ('print("code")\n', '84e0d5', False, False),
             ('```\n', '84e0d5', False, False),

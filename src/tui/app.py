@@ -27,7 +27,7 @@ from tui.transcript import SelectableTranscript, copy_text
 from tui.progress import ResponseProgress
 from tui.conversation import Conversation
 from tui.markdown import markdown_fragments, plain_fragments
-from tui.jobs import WorkerCommands
+from tui.jobs import WorkerCommands, process_fragments
 
 
 # prompt-toolkit has no Shift+Enter key name. Decode terminal encodings as
@@ -94,7 +94,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
         self.preparing_turn = False
         self.activity = "interface demo · mock workers"
         self.composer = TextArea(
-            prompt=" › ", multiline=True, height=Dimension(min=1, max=6),
+            prompt=[("class:composer-prompt", " › ")], multiline=True, height=Dimension(min=1, max=6),
             dont_extend_height=True,
             style="class:composer", completer=SlashCompleter(),
             complete_while_typing=True, history=InMemoryHistory(),
@@ -202,7 +202,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
         body = HSplit([
             Window(FormattedTextControl([
                 ("class:brand", "  moska"),
-                ("class:muted", "  /  local agent workspace"),
+                ("class:accent", "  /  local agent workspace"),
             ]), height=2),
             VSplit([Window(width=2), Window(self.transcript, wrap_lines=True), Window(width=2)]),
             Window(height=1),
@@ -216,9 +216,9 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 ("class:muted", "  Enter send · Shift+Enter newline · PgUp/PgDn scroll · Ctrl+T details · Esc pause"),
             ]), height=1),
             VSplit([
-                Window(FormattedTextControl(lambda: [("class:accent", "  " + self.activity)])),
-                Window(FormattedTextControl(lambda: [("class:accent", self.worker_counter)]), width=28),
-            ], height=1),
+                Window(FormattedTextControl(lambda: [("class:status", "  " + self.activity)])),
+                Window(FormattedTextControl(lambda: [("class:status-count", self.worker_counter)]), width=28),
+            ], height=1, style="class:status"),
         ])
         self.root = FloatContainer(body, floats=[])
         app_options.setdefault("refresh_interval", 1)
@@ -231,19 +231,28 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 "brand": "#2fbead bold",
                 "accent": "#84e0d5",
                 "muted": "#909393",
-                "tool": "bold",
-                "agent": "#2fbead bold",
-                "you": "#ffffff bold",
+                "tool": "#92c7ff bold",
+                "agent": "#3debcb bold",
+                "you": "#d1a684 bold",
                 "moska": "#2fbead bold",
-                "system": "#ffffff",
+                "system": "#e8d5c4",
+                "agents": "#92c7ff bold",
+                "process-summary": "#92c7ff bold",
+                "process-label": "#e8d5c4",
+                "process-pending": "#d1a684 bold",
+                "process-running": "#3debcb bold",
+                "process-workspace": "#84e0d5",
                 "link": "#92c7ff underline",
-                "markdown-heading": "#2fbead bold",
-                "markdown-quote": "#909393 italic",
+                "markdown-heading": "#92c7ff bold",
+                "markdown-quote": "#e9e3d8 italic",
                 "markdown-strong": "#3debcb bold",
-                "markdown-emphasis": "#84e0d5 italic",
+                "markdown-emphasis": "#d1a684 italic",
                 "markdown-code": "#84e0d5",
                 # Muted green-charcoal keeps the input distinct without a blue cast.
                 "composer": "bg:#24332f #ffffff",
+                "composer-prompt": "#3debcb bold",
+                "status": "bg:#005a60 #ffffff",
+                "status-count": "bg:#005a60 #3debcb bold",
                 "completion-menu": "bg:#005a60 #ffffff",
                 "completion-menu.completion.current": "bg:#066d74 #ffffff noreverse",
                 "completion-menu.meta.completion": "bg:#005a60 #ffffff",
@@ -333,7 +342,10 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
         if self.session and not self._restoring:
             self.session.append('message', {'role': role, 'text': text})
         self.fragments.append((f"class:{role}", role + "\n"))
-        self.fragments.extend(markdown_fragments(text) if role == 'moska' else plain_fragments(text))
+        if role == 'agents':
+            self.fragments.extend(process_fragments(text))
+        else:
+            self.fragments.extend(markdown_fragments(text) if role == 'moska' else plain_fragments(text))
         self.fragments.append(("", "\n\n"))
         if self.follow_output:
             self.cursor_line = self.last_line

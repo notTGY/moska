@@ -250,7 +250,9 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.05)
                 view = ''.join(fragment[1] for fragment in ui.render_transcript())
                 self.assertIn('Workspace: ' + str(self.workspace.resolve()), view)
-                self.assertIn('Prompt: hold', view)
+                self.assertIn('  Prompt:\n    hold', view)
+                self.assertTrue(any(fragment[0] == 'class:process-running'
+                                    for fragment in ui.render_transcript()))
                 self.assertIn(worker, view)
                 await self.workers.server.request('test/complete', {'threadId': worker})
                 for _ in range(200):

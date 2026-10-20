@@ -3,12 +3,38 @@
 import asyncio
 import time
 
+from tui.markdown import plain_fragments
+
 
 def duration(seconds):
     seconds = max(0, int(seconds))
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     return f'{hours}h {minutes}m' if hours else (f'{minutes}m {seconds}s' if minutes else f'{seconds}s')
+
+
+def process_fragments(text):
+    """Style a /ps snapshot; indented prompt content stays literal Markdown."""
+    fragments = []
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        if index == 0:
+            fragments.append(('class:process-summary', line))
+        elif line.startswith('  Status: '):
+            label, value = line.split(': ', 1)
+            status = 'pending' if value.startswith('starting') else 'running'
+            fragments.extend([('class:process-label', label + ': '),
+                              ('class:process-' + status, value)])
+        elif line.startswith('  Workspace: '):
+            label, value = line.split(': ', 1)
+            fragments.extend([('class:process-label', label + ': '),
+                              ('class:process-workspace', value)])
+        elif line == '  Prompt:\n':
+            fragments.append(('class:process-label', line))
+        elif line.strip() and not line.startswith(' '):
+            fragments.append(('class:agent', line))
+        else:
+            fragments.extend(plain_fragments(line))
+    return fragments
 
 
 class WorkerCommands:
@@ -24,14 +50,16 @@ class WorkerCommands:
             self.add('system', 'No local agents are running in this workspace.')
             return
         # Snapshot, so users can select/copy a stable full prompt.
-        lines = [self.worker_counter]
+        lines = [f"Local agents · {len(rows)} active"]
         for row in rows:
             status = {'success': 'completed', 'pending': 'starting', 'interrupted': 'stopped'}.get(row['status'], row['status'])
             end = row['finished_at'] if row['finished_at'] is not None else time.time()
             elapsed = duration(end - row['started_at']) if row['started_at'] is not None else '—'
-            lines.extend(['', f"{row['agent_type']} {row['agent_id']} · {status} · {elapsed}",
-                          'Workspace: ' + row['workspace'], 'Prompt: ' + (row['prompt'] or '—')])
-        self.add('system', '\n'.join(lines))
+            lines.extend(['', f"{row['agent_type']} · {row['agent_id']}",
+                          f'  Status: {status} · {elapsed}',
+                          '  Workspace: ' + row['workspace'], '  Prompt:'])
+            lines.extend('    ' + line for line in (row['prompt'] or '—').split('\n'))
+        self.add('agents', '\n'.join(lines))
 
     async def stop_workers(self):
         if not self.worker_runtime:
