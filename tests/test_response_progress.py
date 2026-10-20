@@ -7,7 +7,7 @@ from langgraph_sdk.client import LangGraphClient
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from adapters.openai import OpenAIConnection
+from adapters.providers.openai import OpenAIConnection
 from decomposer import create_decomposer_agent
 from main import ChatUI, DemoCoordinator, MockWorkers
 
@@ -35,7 +35,7 @@ class ResponseProgressTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_tools_agent_reports_and_ctrl_t_toggle(self):
         workers = MockWorkers()
         async with httpx.AsyncClient(transport=httpx.MockTransport(workers.handle), base_url='http://mock.local') as client:
-            with patch('decomposer.core.get_client', return_value=LangGraphClient(client)), patch('main.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
+            with patch('decomposer.core.get_client', return_value=LangGraphClient(client)), patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
                 agent = create_decomposer_agent(decomposer_model=DemoCoordinator(), agent_types=[{
                     'agent_type_id': 'mock', 'description': 'mock', 'assistant_id': 'mock', 'url': 'http://mock.local',
                 }], agent_run_budget_seconds=None)
@@ -76,7 +76,7 @@ class ResponseProgressTests(unittest.IsolatedAsyncioTestCase):
                         await task
 
     async def test_escape_interrupts_execution_and_keeps_app_open(self):
-        with patch('main.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
             agent = WaitingAgent()
             ui = ChatUI(agent, input=pipe, output=DummyOutput())
             task = asyncio.create_task(ui.app.run_async())
@@ -98,7 +98,7 @@ class ResponseProgressTests(unittest.IsolatedAsyncioTestCase):
                     await task
 
     async def test_exit_while_busy_cancels_execution_and_closes_app(self):
-        with patch('main.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), create_pipe_input() as pipe:
             agent = WaitingAgent()
             ui = ChatUI(agent, input=pipe, output=DummyOutput())
             task = asyncio.create_task(ui.app.run_async())

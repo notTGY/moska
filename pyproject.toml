@@ -21,5 +21,12 @@ dependencies = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+moska = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+package-dir = {"" = ".", adapters = "src/adapters", decomposer = "src/decomposer", orchestrator = "src/orchestrator", tui = "src/tui"}
+
 [tool.setuptools.packages.find]
 where = ["src"]

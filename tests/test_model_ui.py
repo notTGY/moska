@@ -5,8 +5,8 @@ from unittest.mock import patch
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from adapters.openai import Account, OpenAIConnection
-from adapters.openai_model import ChatGPTModel
+from adapters.providers.openai import Account, OpenAIConnection
+from adapters.providers.openai_model import ChatGPTModel
 from main import ChatUI, DemoCoordinator
 
 
@@ -38,7 +38,7 @@ class FakeConnection(OpenAIConnection):
 class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_picker_selects_and_activates_model(self):
         connection = FakeConnection()
-        with patch('main.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
             ui = ChatUI(DemoCoordinator(), agent_factory=lambda model: model, input=pipe, output=DummyOutput())
             task = asyncio.create_task(ui.app.run_async())
             try:
@@ -76,7 +76,7 @@ class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_escape_does_not_change_selection(self):
         connection = FakeConnection()
         connection.model = 'first'
-        with patch('main.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
             ui = ChatUI(DemoCoordinator(), agent_factory=lambda model: model, input=pipe, output=DummyOutput())
             task = asyncio.create_task(ui.app.run_async())
             try:
@@ -98,7 +98,7 @@ class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_effort_keeps_previous_model_and_effort(self):
         connection = FakeConnection()
         connection.model, connection.effort = 'first', 'high'
-        with patch('main.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=connection), create_pipe_input() as pipe:
             ui = ChatUI(DemoCoordinator(), agent_factory=lambda model: model, input=pipe, output=DummyOutput())
             task = asyncio.create_task(ui.app.run_async())
             try:

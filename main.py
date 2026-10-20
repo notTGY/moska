@@ -34,8 +34,11 @@ from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Dialog, Label, RadioList, TextArea
 
 from decomposer import create_decomposer_agent
-from adapters.openai import ConnectionError, OpenAIConnection
-from adapters.openai_model import ChatGPTModel
+from adapters.providers import MODEL_PROVIDERS, ProviderError as ConnectionError
+from adapters.agents import AgentSettings, AgentSettingsError, scan_agents
+from tui.agents import AgentSelector
+from tui.transcript import SelectableTranscript, copy_text
+from orchestrator.compaction import CompactionError, ContextCompaction
 
 
 # prompt-toolkit has no Shift+Enter key name. Decode terminal encodings as
@@ -256,10 +259,21 @@ class ProgressCallbacks(AsyncCallbackHandler):
         self.model = model
 
     async def on_chat_model_start(self, serialized, messages, **kwargs):
+        if "moska:compaction" in kwargs.get("tags", []):
+            return
         self.progress.model_requests += 1
         self.progress.set_stage("Waiting for model")
 
+    async def on_custom_event(self, name, data, **kwargs):
+        if name == "moska.compaction":
+            if data["stage"] == "start":
+                self.progress.record("Compacting earlier context", "Compacting context")
+            else:
+                self.progress.record("Context compacted · full history retained", "Continuing orchestration")
+
     async def on_llm_end(self, response, **kwargs):
+        if "moska:compaction" in kwargs.get("tags", []):
+            return
         for generations in response.generations:
             for generation in generations:
                 message = generation.message
@@ -298,7 +312,8 @@ class ProgressCallbacks(AsyncCallbackHandler):
 
 
 COMMANDS = {
-    "/connect": "Continue with ChatGPT",
+    "/agents": "Configure on-device agents",
+    "/connect": "Connect an orchestrator model provider",
     "/model": "Choose model and reasoning effort",
     "/help": "Show commands and demo information",
     "/clear": "Clear the visible conversation",
@@ -319,7 +334,9 @@ class ChatUI:
     def __init__(self, agent, *, agent_factory=None, **app_options):
         self.agent = agent
         self.agent_factory = agent_factory
-        self.connection = OpenAIConnection()
+        self.provider = next(iter(MODEL_PROVIDERS.values()))
+        self.connection = self.provider.create_connection()
+        self.agent_settings = AgentSettings()
         self.account = None
         self.model = None
         self.reasoning_effort = None
@@ -339,8 +356,8 @@ class ChatUI:
             style="class:composer", completer=SlashCompleter(),
             complete_while_typing=True, history=InMemoryHistory(),
         )
-        self.transcript = FormattedTextControl(
-            self.render_transcript,
+        self.transcript = SelectableTranscript(
+            self.render_transcript, lambda: self.app.invalidate(), self.copy_selection,
             get_cursor_position=lambda: Point(x=0, y=self.cursor_line),
             show_cursor=False,
         )
@@ -369,13 +386,15 @@ class ChatUI:
                 self.task = event.app.create_background_task(self.connect(text.removeprefix("/connect").strip()))
             elif text == "/model" or text.startswith("/model "):
                 self.task = event.app.create_background_task(self.choose_model(text.removeprefix("/model").strip()))
+            elif text == "/agents":
+                self.task = event.app.create_background_task(self.configure_agents())
             elif text == "/help":
                 self.add("moska", "Commands\n" + "\n".join(
                     f"{command}  {description}" for command, description in COMMANDS.items()
                 ) + "\n\nEach message runs a mock worker that reports hello.\n"
                     "Use /model to replace the demo coordinator with your selected model.\n"
                     "Ctrl+T shows tool activity. Esc interrupts a response; /exit works while busy.\n"
-                    "/connect opens ChatGPT sign-in; /connect new adds an account.\n"
+                    "/connect configures the orchestrator provider; /agents configures local workers.\n"
                     "/connect accounts lists saved accounts; /connect 1 selects one.\n"
                     "https://python-prompt-toolkit.readthedocs.io/")
             elif text.startswith("/"):
@@ -411,7 +430,9 @@ class ChatUI:
 
         @keys.add("c-c")
         def cancel(event):
-            if self.task and not self.task.done():
+            if self.transcript.selected_text:
+                self.copy_selection(self.transcript.selected_text)
+            elif self.task and not self.task.done():
                 self.task.cancel()
             else:
                 self.composer.buffer.reset()
@@ -470,6 +491,10 @@ class ChatUI:
                 "dialog frame.label": "#a6d8cc bold",
                 "radio-selected": "bg:#444444 #ffffff",
                 "radio-checked": "#a6d8cc",
+                "agent-option": "#dddddd",
+                "agent-option.focused": "bg:#444444",
+                "agent-option.disabled": "#777777 italic",
+                "selected-text": "bg:#465466 #ffffff",
             }),
             **app_options,
         )
@@ -487,16 +512,22 @@ class ChatUI:
         if self.model:
             return f"{self.model} · {self.reasoning_effort or 'default'} reasoning · mock workers"
         if self.account and self.account.plan_enabled:
-            return "ChatGPT connected · interface demo · mock workers"
+            return f"{self.provider.account_name} connected · interface demo · mock workers"
         return "interface demo · mock workers"
+
+    def copy_selection(self, text):
+        async def copy():
+            try:
+                await copy_text(text)
+            except (OSError, RuntimeError, TimeoutError) as error:
+                self.add("system", str(error))
+        self.app.create_background_task(copy())
 
     def activate_model(self):
         self.model = self.connection.selected_model() if self.account and self.account.plan_enabled else None
         self.reasoning_effort = self.connection.selected_reasoning_effort() if self.model else None
         if self.agent_factory:
-            model = ChatGPTModel(
-                connection=self.connection, model_name=self.model, reasoning_effort=self.reasoning_effort,
-            ) if self.model else DemoCoordinator()
+            model = self.provider.create_model(self.connection, self.model, self.reasoning_effort) if self.model else DemoCoordinator()
             self.agent = self.agent_factory(model)
 
     async def pick(self, title, values, default=None):
@@ -572,15 +603,65 @@ class ChatUI:
             self.activity = self.idle_activity
             self.app.invalidate()
 
-    async def connect(self, option=""):
-        self.activity = "waiting for ChatGPT sign-in · Ctrl+C to cancel"
+    async def configure_agents(self):
+        self.activity = "scanning for on-device agents…"
         self.app.invalidate()
         try:
-            accounts = self.connection.accounts()
+            entries = await asyncio.to_thread(scan_agents)
+            enabled = self.agent_settings.enabled()
+            self.pick_future = asyncio.get_running_loop().create_future()
+
+            def accept(selected):
+                if not self.pick_future.done():
+                    self.pick_future.set_result(selected)
+
+            self.picker = AgentSelector(entries, enabled, accept, self.app.invalidate)
+            dialog = Float(content=Dialog(title="On-device agents", width=78, body=self.picker))
+            self.root.floats.append(dialog)
+            self.app.layout.focus(self.picker.control)
+            self.activity = "configure on-device agents"
+            self.app.invalidate()
+            try:
+                selected = await self.pick_future
+            finally:
+                self.root.floats.remove(dialog)
+                self.picker = None
+                self.pick_future = None
+                self.app.layout.focus(self.composer)
+            if selected is not None:
+                self.agent_settings.save(selected)
+                names = [entry.spec.name for entry in entries if entry.spec.agent_id in selected]
+                self.add("system", "Local agents: " + (", ".join(names) if names else "none enabled")
+                         + ".\nSaved. Worker execution is still mocked.")
+        except AgentSettingsError as error:
+            self.add("system", str(error))
+        finally:
+            self.activity = self.idle_activity
+            self.app.invalidate()
+
+    async def connect(self, option=""):
+        self.activity = "connecting model provider · Esc cancel"
+        self.app.invalidate()
+        try:
+            provider = self.provider
+            parts = option.split(maxsplit=1)
+            if parts and parts[0] in MODEL_PROVIDERS:
+                provider = MODEL_PROVIDERS[parts[0]]
+                option = parts[1] if len(parts) > 1 else ""
+            elif not option and len(MODEL_PROVIDERS) > 1:
+                chosen = await self.pick(
+                    "Orchestrator provider", [(spec.provider_id, spec.name) for spec in MODEL_PROVIDERS.values()],
+                    self.provider.provider_id,
+                )
+                if chosen is None:
+                    return
+                provider = MODEL_PROVIDERS[chosen]
+            connection = self.connection if provider == self.provider else provider.create_connection()
+            accounts = connection.accounts()
             if option == "accounts":
                 lines = [
-                    f"{index}. {account.email or 'ChatGPT account'}"
-                    + (" · active" if self.account and self.account.client_id == account.client_id else "")
+                    f"{index}. {account.email or provider.account_name + ' account'}"
+                    + (" · active" if provider == self.provider and self.account and self.account.client_id == account.client_id else "")
                     for index, account in enumerate(accounts, 1)
                 ]
                 self.add("system", "\n".join(lines) + "\nUse /connect <number> or /connect new."
@@ -589,28 +670,25 @@ class ChatUI:
             client_id = None
             if option.isdecimal() and 1 <= int(option) <= len(accounts):
                 client_id = accounts[int(option) - 1].client_id
-            elif option not in ("", "openai", "new"):
+            elif option not in ("", "new"):
                 self.add("system", "Use /connect, /connect new, or /connect accounts.")
                 return
 
             def notify(url):
-                self.add("system", "Continue with ChatGPT\n"
-                         "Sign in and allow Moska to use your ChatGPT plan.\n"
-                         "If the browser doesn't open, click this link:\n" + url)
+                self.add("system", provider.connect_label + "\n" + provider.connect_instructions
+                         + "\nIf the browser doesn't open, click this link:\n" + url)
 
             previous = self.account
-            self.account = await self.connection.sign_in(
-                notify, new_account=option == "new", client_id=client_id,
-            )
-            if not previous or previous.client_id != self.account.client_id:
+            account = await connection.sign_in(notify, new_account=option == "new", client_id=client_id)
+            if provider != self.provider or not previous or previous.client_id != account.client_id:
                 self.config = {"configurable": {"thread_id": str(uuid4())}}
+            self.provider, self.connection, self.account = provider, connection, account
             self.activate_model()
             if self.account.plan_enabled:
-                self.add("system", f"Connected to ChatGPT as {self.account.email or 'your account'}.\n"
-                         "ChatGPT plan usage is enabled. Use /model to choose the orchestrator model.")
+                self.add("system", f"Connected to {provider.account_name} as {self.account.email or 'your account'}.\n"
+                         + provider.access_label + " is enabled. Use /model to choose the orchestrator model.")
             else:
-                self.add("system", "Signed in, but ChatGPT plan usage wasn't granted.\n"
-                         "Run /connect again and allow plan usage to enable model access.")
+                self.add("system", "Signed in, but model access wasn't granted.\nRun /connect again to enable access.")
         except asyncio.CancelledError:
             self.add("system", "Sign-in cancelled. Your previous connection is unchanged.")
             raise
@@ -681,14 +759,17 @@ class ChatUI:
                 self.app.invalidate()
             progress.finish("Responded")
         except asyncio.CancelledError:
+            compacting = progress.stage == "Compacting context"
             progress.finish("Interrupted")
             self.add("system", "Interrupted.")
-            self.config = {"configurable": {"thread_id": str(uuid4())}}
+            if not compacting:
+                self.config = {"configurable": {"thread_id": str(uuid4())}}
             raise
         except Exception as error:
             progress.finish("Failed")
             self.add("system", f"Error: {error}")
-            self.config = {"configurable": {"thread_id": str(uuid4())}}
+            if not isinstance(error, CompactionError):
+                self.config = {"configurable": {"thread_id": str(uuid4())}}
         finally:
             self.activity = self.idle_activity
             self.app.invalidate()
@@ -712,6 +793,7 @@ async def chat():
                         "assistant_id": "mock", "url": "http://mock.local",
                     }],
                     checkpointer=memory, agent_run_budget_seconds=None,
+                    middleware=[] if isinstance(model, DemoCoordinator) else [ContextCompaction(model)],
                 )
 
             ui = ChatUI(build_agent(DemoCoordinator()), agent_factory=build_agent)

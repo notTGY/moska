@@ -1,1 +1,1 @@
-"""Connections to model providers and local agent runtimes."""
+"""Independent adapter families: providers for the orchestrator; agents for workers."""

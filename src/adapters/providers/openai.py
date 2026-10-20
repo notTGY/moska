@@ -30,8 +30,7 @@ SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use
 PLAN_SCOPE = "chatgpt.tokens.use.direct"
 
 
-class ConnectionError(Exception):
-    """A credential-free error safe to display in the TUI."""
+from .base import ProviderError as ConnectionError
 
 
 @dataclass(frozen=True)

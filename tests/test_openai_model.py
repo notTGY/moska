@@ -6,8 +6,8 @@ import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph_sdk.client import LangGraphClient
 
-from adapters.openai import ConnectionError, OpenAIConnection
-from adapters.openai_model import ChatGPTModel
+from adapters.providers.openai import ConnectionError, OpenAIConnection
+from adapters.providers.openai_model import ChatGPTModel
 from decomposer import create_decomposer_agent
 from main import MockWorkers
 
@@ -56,7 +56,7 @@ class ChatGPTModelTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, content=content, headers={'content-type': 'text/event-stream'})
 
         transport = httpx.MockTransport(handle)
-        with patch('adapters.openai_model.httpx.AsyncClient', side_effect=lambda **kw: REAL_CLIENT(transport=transport, **kw)):
+        with patch('adapters.providers.openai_model.httpx.AsyncClient', side_effect=lambda **kw: REAL_CLIENT(transport=transport, **kw)):
             async with REAL_CLIENT(transport=transport, base_url='http://mock.local') as http:
                 with patch('decomposer.core.get_client', return_value=LangGraphClient(http)):
                     model = ChatGPTModel(connection=FakeConnection(), model_name='test-model', reasoning_effort='high')
@@ -86,7 +86,7 @@ class ChatGPTModelTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(event=event):
                 content = 'data: ' + json.dumps(event) + '\n\n' if event else 'data: [DONE]\n\n'
                 transport = httpx.MockTransport(lambda request: httpx.Response(200, content=content))
-                with patch('adapters.openai_model.httpx.AsyncClient', side_effect=lambda **kw: REAL_CLIENT(transport=transport, **kw)):
+                with patch('adapters.providers.openai_model.httpx.AsyncClient', side_effect=lambda **kw: REAL_CLIENT(transport=transport, **kw)):
                     model = ChatGPTModel(connection=FakeConnection(), model_name='test-model')
                     with self.assertRaises(ConnectionError):
                         await model.ainvoke('hi')

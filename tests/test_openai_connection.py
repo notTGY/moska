@@ -14,7 +14,7 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from adapters.openai import ConnectionError, ISSUER, PLAN_SCOPE, OpenAIConnection
+from adapters.providers.openai import ConnectionError, ISSUER, PLAN_SCOPE, OpenAIConnection
 
 REAL_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -46,7 +46,7 @@ class OpenAIConnectionTests(unittest.IsolatedAsyncioTestCase):
              'default_reasoning_level': 'low'},
         ]
         self.transport = httpx.MockTransport(self.handle)
-        self.patch = patch('adapters.openai.httpx.AsyncClient', side_effect=self.make_client)
+        self.patch = patch('adapters.providers.openai.httpx.AsyncClient', side_effect=self.make_client)
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
