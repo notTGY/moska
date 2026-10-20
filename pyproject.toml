@@ -11,6 +11,7 @@ dependencies = [
     "langgraph>=1.2.16",
     "langgraph-sdk>=0.4.8",
     "langsmith>=0.14.11",
+    "prompt-toolkit>=3.0.53",
     "pydantic>=2.14.1",
     "typing-extensions>=4.16.0",
 ]
