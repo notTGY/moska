@@ -1,2 +1,3 @@
 # moska
-control multiple remote ai agents safely
+
+control multiple ai agents. one model knows all your context
