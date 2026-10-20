@@ -24,6 +24,11 @@ class ConfigurationDialogs:
             self.demo_mode = demo
             model = self.provider.create_model(self.connection, self.model, self.reasoning_effort) if self.model else DemoCoordinator()
             self.agent = self.agent_factory(model)
+        if self.session:
+            self.session.set_meta('thread_id', self.config['configurable']['thread_id'])
+            self.session.set_meta('demo_mode', self.demo_mode)
+            self.session.event('model_selection', {'provider': self.provider.provider_id,
+                                                  'model': self.model, 'reasoning_effort': self.reasoning_effort})
 
     async def pick(self, title, values, default=None):
         self.pick_future = asyncio.get_running_loop().create_future()
@@ -176,7 +181,8 @@ class ConfigurationDialogs:
             previous = self.account
             account = await connection.sign_in(notify, new_account=option == "new", client_id=client_id)
             if provider != self.provider or not previous or previous.client_id != account.client_id:
-                self.config = {"configurable": {"thread_id": str(uuid4())}}
+                if not self.session:
+                    self.config = {"configurable": {"thread_id": str(uuid4())}}
             self.provider, self.connection, self.account = provider, connection, account
             self.activate_model()
             if self.account.plan_enabled:

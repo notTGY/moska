@@ -42,9 +42,14 @@ class DemoCoordinator(BaseChatModel):
 class MockWorkers:
     """In-memory LangGraph transport; workers do no work and report hello."""
 
-    def __init__(self):
-        self.threads = {}
-        self.runs = {}
+    def __init__(self, storage=None):
+        self.storage = storage
+        self.threads = storage.workers('mock', 'thread') if storage else {}
+        self.runs = storage.workers('mock', 'run') if storage else {}
+
+    def save(self, kind, key, value):
+        if self.storage:
+            self.storage.save_worker('mock', kind, key, value)
 
     def handle(self, request):
         parts = request.url.path.strip("/").split("/")
@@ -52,6 +57,7 @@ class MockWorkers:
         if parts == ["threads"] and request.method == "POST":
             thread_id = str(uuid4())
             self.threads[thread_id] = []
+            self.save('thread', thread_id, [])
             return httpx.Response(200, json={"thread_id": thread_id})
 
         thread_id = parts[1]
@@ -60,6 +66,7 @@ class MockWorkers:
         if parts[2:] == ["copy"]:
             copy_id = str(uuid4())
             self.threads[copy_id] = deepcopy(self.threads[thread_id])
+            self.save('thread', copy_id, self.threads[copy_id])
             return httpx.Response(200, json={"thread_id": copy_id})
         if parts[2:] == ["runs"] and request.method == "POST":
             run_id = str(uuid4())
@@ -73,6 +80,8 @@ class MockWorkers:
                     {"values": {"messages": before}, "metadata": {"source": "input"}},
                 ],
             }
+            self.save('thread', thread_id, after)
+            self.save('run', run_id, self.runs[run_id])
             return httpx.Response(200, json={"run_id": run_id, "status": "pending"})
         if parts[2:3] == ["runs"] and request.method == "GET":
             run = self.runs[parts[3]]

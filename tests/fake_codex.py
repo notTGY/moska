@@ -15,6 +15,15 @@ lock = threading.Lock()
 threads = {}
 turns = {}
 queued = set()
+state_path = os.path.join(os.getcwd(), '.fake-codex-history.json')
+if os.path.exists(state_path):
+    with open(state_path) as saved:
+        threads = json.load(saved)
+
+
+def save_threads():
+    with open(state_path, 'w') as saved:
+        json.dump(threads, saved)
 
 
 def send(message):
@@ -47,11 +56,16 @@ for line in sys.stdin:
         assert params['cwd'] == os.getcwd()
         thread = str(uuid4())
         threads[thread] = []
+        save_threads()
         result = {'thread': {'id': thread}}
     elif method == 'thread/fork':
         thread = str(uuid4())
         threads[thread] = list(threads[params['threadId']])
+        save_threads()
         result = {'thread': {'id': thread}}
+    elif method == 'thread/resume':
+        assert params['threadId'] in threads
+        result = {'thread': {'id': params['threadId']}}
     elif method == 'turn/start':
         assert params['sandboxPolicy']['type'] == 'workspaceWrite'
         assert params['sandboxPolicy']['networkAccess'] is False
@@ -66,6 +80,7 @@ for line in sys.stdin:
             queued.add(thread)
         previous = list(threads[thread])
         threads[thread].append(prompt)
+        save_threads()
         event('turn/started', threadId=thread, turn={'id': turn, 'status': 'inProgress'})
         if prompt == 'crash':
             os._exit(4)
@@ -97,6 +112,12 @@ for line in sys.stdin:
     elif method == 'test/approval':
         send({'id': 'approval-test', 'method': 'item/commandExecution/requestApproval', 'params': {'command': 'bad'}})
         send({'id': 'unknown-test', 'method': 'future/privilegedRequest', 'params': {}})
+    elif method == 'test/complete':
+        thread = params['threadId']
+        turn = turns[thread]
+        event('item/completed', threadId=thread, turnId=turn, item={
+            'id': 'answer-' + turn, 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'background result'})
+        event('turn/completed', threadId=thread, turn={'id': turn, 'status': 'completed', 'items': []})
     elif method == 'test/no-response':
         continue
     if 'id' in request:

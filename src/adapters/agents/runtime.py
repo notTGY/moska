@@ -11,11 +11,12 @@ from .registry import AGENT_SPECS
 
 
 class LocalWorkers:
-    def __init__(self, workspace, settings, *, specs=AGENT_SPECS):
+    def __init__(self, workspace, settings, *, specs=AGENT_SPECS, storage=None):
         self.on_event = lambda agent, item: None
         self.runtimes = {
             spec.agent_id: spec.runtime_factory(
-                workspace, settings, on_event=lambda agent, item: self.on_event(agent, item),
+                workspace, settings, storage=storage,
+                on_event=lambda agent, item: self.on_event(agent, item),
             )
             for spec in specs if spec.runtime_factory is not None
         }
@@ -28,8 +29,26 @@ class LocalWorkers:
     def routes(self):
         return {runtime.agent_type['url']: runtime.handle for runtime in self.runtimes.values()}
 
+    @property
+    def running_count(self):
+        return sum(len(runtime.active) for runtime in self.runtimes.values())
+
+    def processes(self):
+        return [row for runtime in self.runtimes.values() for row in runtime.processes()]
+
+    def suspend_starts(self, value):
+        for runtime in self.runtimes.values():
+            runtime.stopping = value
+
     async def interrupt_all(self):
         await asyncio.gather(*(runtime.interrupt_all() for runtime in self.runtimes.values()))
+
+    def recover_operation(self, origin, record):
+        for runtime in self.runtimes.values():
+            result = runtime.recover_operation(origin, record)
+            if result is not None:
+                return result
+        return None
 
     async def close(self):
         await asyncio.gather(*(runtime.close() for runtime in self.runtimes.values()))

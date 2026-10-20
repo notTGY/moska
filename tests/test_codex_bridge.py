@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -38,7 +39,10 @@ class ToolCycle(BaseChatModel):
         last = messages[-1]
         self.calls.append(last)
         if isinstance(last, HumanMessage):
-            name, args = 'new', {'agent_type_id': 'codex'}
+            if any(isinstance(message, ToolMessage) and message.name == 'run' for message in messages):
+                name, args = 'wait', {}
+            else:
+                name, args = 'new', {'agent_type_id': 'codex'}
         else:
             output = json.loads(last.content)
             if last.name == 'new':
@@ -47,7 +51,7 @@ class ToolCycle(BaseChatModel):
                 name, args = 'wait', {}
             else:
                 return ChatResult(generations=[ChatGeneration(message=AIMessage(content=output[0]['response']))])
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'id': name, 'name': name, 'args': args}]))])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content='', tool_calls=[{'id': str(uuid4()), 'name': name, 'args': args}]))])
 
 
 class CodexVersionTests(unittest.TestCase):
@@ -109,7 +113,7 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.settings.save({'codex'})
         self.version = patch('adapters.agents.bridge.require_codex', return_value=FAKE_CODEX)
         self.version.start()
-        self.runtime = await OrchestratorRuntime(self.workspace, settings=self.settings).__aenter__()
+        self.runtime = await OrchestratorRuntime(self.workspace, settings=self.settings, persistent=False).__aenter__()
         self.workers = self.runtime.workers.runtimes['codex']
         self.events = []
         self.runtime.workers.on_event = lambda agent, item: self.events.append((agent, item))
@@ -215,11 +219,92 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report['tool_calls'][0]['name'], 'commandExecution')
         self.assertEqual([message.name for message in model.calls if isinstance(message, ToolMessage)], ['new', 'run', 'wait'])
 
-    async def test_ui_escape_stops_workers_without_exposing_their_tools(self):
+    async def test_followups_steer_the_orchestrator_without_restarting_workers(self):
+        model = ToolCycle(worker_prompt='hold')
+        agent = self.runtime.create_agent(model)
+        disconnected = SimpleNamespace(current_account=lambda: None)
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=disconnected), create_pipe_input() as pipe:
+            ui = ChatUI(agent, worker_runtime=self.runtime.workers, prepare_turn=self.runtime.prepare_turn,
+                        input=pipe, output=DummyOutput())
+            task = asyncio.create_task(ui.app.run_async())
+            try:
+                await asyncio.sleep(.05)
+                pipe.send_text('inspect\r')
+                for _ in range(200):
+                    if model.calls and isinstance(model.calls[-1], ToolMessage) and model.calls[-1].name == 'run':
+                        break
+                    await asyncio.sleep(.01)
+                worker = next(iter(self.workers.active))
+                config = ui.config
+                pipe.send_text('focus on tests\r')
+                for _ in range(200):
+                    if len(ui.progress) > 1 and any(isinstance(message, HumanMessage) and message.content == 'focus on tests' for message in model.calls):
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(ui.progress[0].stage, 'Steered')
+                self.assertIn(worker, self.workers.active)
+                self.assertEqual(ui.config, config)
+                self.assertEqual(len(self.workers.threads), 1)
+                self.assertIn('1 agent running', ui.worker_counter)
+                pipe.send_text('/ps\r')
+                await asyncio.sleep(.05)
+                view = ''.join(fragment[1] for fragment in ui.render_transcript())
+                self.assertIn('Workspace: ' + str(self.workspace.resolve()), view)
+                self.assertIn('Prompt: hold', view)
+                self.assertIn(worker, view)
+                await self.workers.server.request('test/complete', {'threadId': worker})
+                for _ in range(200):
+                    if ui.progress[-1].finished:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(ui.progress[-1].stage, 'Responded')
+                self.assertIn('0 agents running', ui.worker_counter)
+                pipe.send_text('/exit\r')
+                await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    ui.app.exit()
+                    await task
+
+    async def test_stop_command_stops_all_agents_while_orchestrator_is_running(self):
         agent = self.runtime.create_agent(ToolCycle(worker_prompt='hold'))
         disconnected = SimpleNamespace(current_account=lambda: None)
         with patch('adapters.providers.registry.OpenAIConnection', return_value=disconnected), create_pipe_input() as pipe:
-            ui = ChatUI(agent, worker_runtime=self.runtime.workers, input=pipe, output=DummyOutput())
+            ui = ChatUI(agent, worker_runtime=self.runtime.workers, prepare_turn=self.runtime.prepare_turn,
+                        input=pipe, output=DummyOutput())
+            task = asyncio.create_task(ui.app.run_async())
+            try:
+                await asyncio.sleep(.05)
+                pipe.send_text('inspect\r')
+                for _ in range(200):
+                    if self.workers.active:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(self.runtime.workers.running_count, 1)
+                pipe.send_text('/stop\r')
+                for _ in range(200):
+                    if ui.stop_task and ui.stop_task.done():
+                        break
+                    await asyncio.sleep(.01)
+                self.assertFalse(self.workers.active)
+                self.assertTrue(ui.task.cancelled())
+                self.assertIn('Stopped 1 background agent.', ''.join(fragment[1] for fragment in ui.render_transcript()))
+                self.assertFalse(self.workers.stopping)
+                self.assertTrue(self.workers.server.ready)
+                pipe.send_text('/exit\r')
+                await asyncio.wait_for(task, 2)
+            finally:
+                if not task.done():
+                    ui.app.exit()
+                    await task
+
+    async def test_ui_escape_preserves_workers_context_and_later_collects_results(self):
+        agent = self.runtime.create_agent(ToolCycle(worker_prompt='hold'))
+        disconnected = SimpleNamespace(current_account=lambda: None)
+        with patch('adapters.providers.registry.OpenAIConnection', return_value=disconnected), create_pipe_input() as pipe:
+            ui = ChatUI(agent, worker_runtime=self.runtime.workers, prepare_turn=self.runtime.prepare_turn,
+                        input=pipe, output=DummyOutput())
+            config = ui.config
             task = asyncio.create_task(ui.app.run_async())
             try:
                 await asyncio.sleep(.05)
@@ -239,9 +324,20 @@ class CodexBridgeTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(.01)
                 self.assertTrue(ui.task.cancelled())
-                self.assertFalse(self.workers.active)
+                self.assertTrue(self.workers.active)
+                self.assertEqual(ui.config, config)
                 self.assertEqual(ui.progress[-1].stage, 'Interrupted')
                 self.assertFalse(task.done())
+                worker = next(iter(self.workers.active))
+                await self.workers.server.request('test/complete', {'threadId': worker})
+                pipe.send_text('collect the result\r')
+                for _ in range(200):
+                    if len(ui.progress) == 2 and ui.progress[-1].finished:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(ui.progress[-1].stage, 'Responded')
+                self.assertIn('background result', ''.join(fragment[1] for fragment in ui.render_transcript()))
+                self.assertEqual(len(self.workers.threads), 1)
                 pipe.send_text('/exit\r')
                 await asyncio.wait_for(task, 2)
             finally:

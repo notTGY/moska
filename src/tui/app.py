@@ -5,7 +5,6 @@ import re
 import webbrowser
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
 from prompt_toolkit import Application
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Point
@@ -15,7 +14,7 @@ from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
-    Float, FloatContainer, FormattedTextControl, HSplit, Layout, VSplit, Window,
+    FloatContainer, FormattedTextControl, HSplit, Layout, VSplit, Window,
 )
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -27,8 +26,9 @@ from adapters.providers import MODEL_PROVIDERS, ProviderError as ConnectionError
 from adapters.agents import AgentSettings
 from tui.configuration import ConfigurationDialogs
 from tui.transcript import SelectableTranscript, copy_text
-from orchestrator.compaction import CompactionError
-from tui.progress import ProgressCallbacks, ResponseProgress
+from tui.progress import ResponseProgress
+from tui.conversation import Conversation
+from tui.jobs import WorkerCommands
 
 
 # prompt-toolkit has no Shift+Enter key name. Decode terminal encodings as
@@ -44,6 +44,8 @@ for letter in "abcdefghijklmnopqrstuvwxyz":
 
 COMMANDS = {
     "/agents": "Configure on-device agents",
+    "/ps": "List agents, workspaces, prompts and runtime",
+    "/stop": "Pause orchestration and stop all background agents",
     "/connect": "Connect an orchestrator model provider",
     "/model": "Choose model and reasoning effort",
     "/help": "Show commands and demo information",
@@ -61,28 +63,36 @@ class SlashCompleter(Completer):
                     yield Completion(command, start_position=-len(prefix), display_meta=description)
 
 
-class ChatUI(ConfigurationDialogs):
+class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
     def __init__(self, agent, *, agent_factory=None, worker_runtime=None,
-                 agent_settings=None, **app_options):
+                 agent_settings=None, session=None, prepare_turn=None, **app_options):
         self.agent = agent
         self.agent_factory = agent_factory
         self.worker_runtime = worker_runtime
+        self.session = session
+        self.prepare_turn = prepare_turn
+        self._restoring = False
         self.provider = next(iter(MODEL_PROVIDERS.values()))
         self.connection = self.provider.create_connection()
         self.agent_settings = agent_settings or AgentSettings()
         self.account = None
         self.model = None
         self.reasoning_effort = None
-        self.demo_mode = True
+        self.demo_mode = session.meta('demo_mode', True) if session else True
         self.picker = None
         self.pick_future = None
-        self.config = {"configurable": {"thread_id": str(uuid4())}}
+        self.config = {"configurable": {"thread_id": session.meta('thread_id', session.session_id) if session else str(uuid4())}}
         self.fragments = []
         self.progress = []
-        self.expanded_tools = False
+        self.expanded_tools = True
         self.follow_output = True
         self.cursor_line = 0
         self.task = None
+        self.stop_task = None
+        self.pending_messages = session.meta('pending_messages', []) if session else []
+        self.responding = False
+        self.restart_response = False
+        self.preparing_turn = False
         self.activity = "interface demo · mock workers"
         self.composer = TextArea(
             prompt=" › ", multiline=True, height=Dimension(min=1, max=6),
@@ -105,13 +115,24 @@ class ChatUI(ConfigurationDialogs):
                 return
             buffer.cancel_completion()
             text = buffer.text.strip()
-            if not text or (self.task and not self.task.done() and text != "/exit"):
+            if not text:
+                return
+            busy = self.task and not self.task.done()
+            if self.stop_task and not self.stop_task.done() and text not in ('/exit', '/ps', '/help'):
+                return
+            if busy and text not in ('/exit', '/ps', '/stop', '/help') and (text.startswith('/') or not self.responding):
                 return
             buffer.append_to_history()
             buffer.reset()
             if text == "/exit":
                 event.app.exit()
+            elif text == "/ps":
+                self.show_processes()
+            elif text == "/stop":
+                self.stop_task = event.app.create_background_task(self.stop_workers())
             elif text == "/clear":
+                if self.session:
+                    self.session.append('clear', {})
                 self.fragments.clear()
                 self.progress.clear()
                 self.follow_output = True
@@ -127,16 +148,15 @@ class ChatUI(ConfigurationDialogs):
                     f"{command}  {description}" for command, description in COMMANDS.items()
                 ) + "\n\nWithout a selected model, the interface demo uses mock workers.\n"
                     "Use /model to select the orchestrator and /agents to enable local Codex workers.\n"
-                    "Ctrl+T shows tool activity. Esc interrupts a response; /exit works while busy.\n"
+                    "Ctrl+T toggles tool activity. Esc pauses the orchestrator; workers continue.\n"
+                    "Send follow-ups to steer. /ps lists agents; /stop stops all background agents.\n"
                     "/connect configures the orchestrator provider; /agents configures local workers.\n"
                     "/connect accounts lists saved accounts; /connect 1 selects one.\n"
                     "https://python-prompt-toolkit.readthedocs.io/")
             elif text.startswith("/"):
                 self.add("system", "Unknown command. Type / to see available commands.")
             else:
-                self.follow_output = True
-                self.add("you", text)
-                self.task = event.app.create_background_task(self.respond(text))
+                self.submit_message(text)
 
         @keys.add("escape", filter=Condition(lambda: self.picker is not None))
         def dismiss(event):
@@ -147,8 +167,7 @@ class ChatUI(ConfigurationDialogs):
             lambda: self.picker is None and self.task is not None and not self.task.done()
         ))
         def interrupt(event):
-            if not self.task.cancelling():
-                self.task.cancel()
+            self.interrupt_response()
 
         @keys.add("c-t")
         def toggle_tools(event):
@@ -168,7 +187,7 @@ class ChatUI(ConfigurationDialogs):
             if self.transcript.selected_text:
                 self.copy_selection(self.transcript.selected_text)
             elif self.task and not self.task.done():
-                self.task.cancel()
+                self.interrupt_response()
             else:
                 self.composer.buffer.reset()
 
@@ -196,13 +215,15 @@ class ChatUI(ConfigurationDialogs):
                 Window(height=1, style="class:composer"),
             ], style="class:composer"),
             Window(FormattedTextControl(lambda: [
-                ("class:muted", "  Enter send · Shift+Enter newline · Ctrl+T details · Esc interrupt"),
+                ("class:muted", "  Enter send · Shift+Enter newline · Ctrl+T details · Esc pause"),
             ]), height=1),
-            Window(FormattedTextControl(lambda: [
-                ("class:accent", "  " + self.activity),
-            ]), height=1),
+            VSplit([
+                Window(FormattedTextControl(lambda: [("class:accent", "  " + self.activity)])),
+                Window(FormattedTextControl(lambda: [("class:accent", self.worker_counter)]), width=28),
+            ], height=1),
         ])
         self.root = FloatContainer(body, floats=[])
+        app_options.setdefault("refresh_interval", 1)
         self.app = Application(
             layout=Layout(self.root, focused_element=self.composer),
             key_bindings=keys, full_screen=True, mouse_support=True,
@@ -233,8 +254,11 @@ class ChatUI(ConfigurationDialogs):
             }),
             **app_options,
         )
-        self.add("moska", "What would you like to work on?\n"
-                 "Use /model to choose the orchestrator and /agents to configure local workers.")
+        if self.session and self.session.transcript():
+            self.restore_session()
+        else:
+            self.add("moska", "What would you like to work on?\n"
+                     "Use /model to choose the orchestrator and /agents to configure local workers.")
         try:
             self.account = self.connection.current_account()
             self.activate_model()
@@ -271,6 +295,11 @@ class ChatUI(ConfigurationDialogs):
         return fragments
 
     def refresh_progress(self):
+        if self.session and not self._restoring:
+            for progress in self.progress:
+                if progress.storage_id is not None and progress.persisted_revision != progress.revision:
+                    self.session.update(progress.storage_id, progress.snapshot())
+                    progress.persisted_revision = progress.revision
         if self.follow_output:
             self.cursor_line = self.last_line
         self.app.invalidate()
@@ -281,6 +310,8 @@ class ChatUI(ConfigurationDialogs):
 
     def add(self, role, text):
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
+        if self.session and not self._restoring:
+            self.session.append('message', {'role': role, 'text': text})
         self.fragments.append((f"class:{role}", role + "\n"))
         start = 0
         for match in re.finditer(r"https?://[^\s<>]+", text):
@@ -298,46 +329,28 @@ class ChatUI(ConfigurationDialogs):
             self.cursor_line = self.last_line
         self.app.invalidate()
 
-    async def respond(self, prompt):
-        progress = ResponseProgress(len(self.fragments), self.refresh_progress)
-        self.fragments.append(("", ""))
-        self.progress.append(progress)
-        progress.record("Message received", "Preparing request")
-        self.activity = "working… · Esc interrupt · /exit quit"
-        callbacks = ProgressCallbacks(progress, self.model or "scripted demo")
+    def restore_session(self):
+        self._restoring = True
         try:
-            async for update in self.agent.astream(
-                {"messages": [HumanMessage(content=prompt)], "agents": {}, "agent_runs": {}},
-                config={**self.config, "callbacks": [callbacks]}, stream_mode="updates",
-            ):
-                for value in update.values():
-                    if not isinstance(value, dict):
-                        continue
-                    progress.state_update(value)
-                    for message in value.get("messages", []):
-                        if isinstance(message, AIMessage) and message.content and not message.tool_calls:
-                            self.add("moska", message.text)
-                self.app.invalidate()
-            progress.finish("Responded")
-        except asyncio.CancelledError:
-            compacting = progress.stage == "Compacting context"
-            progress.finish("Interrupted")
-            self.add("system", "Interrupted.")
-            if self.worker_runtime:
-                self.activity = "stopping local workers…"
-                self.app.invalidate()
-                await self.worker_runtime.interrupt_all()
-            if not compacting:
-                self.config = {"configurable": {"thread_id": str(uuid4())}}
-            raise
-        except Exception as error:
-            progress.finish("Failed")
-            self.add("system", f"Error: {error}")
-            if self.worker_runtime:
-                await self.worker_runtime.interrupt_all()
-            if not isinstance(error, CompactionError):
-                self.config = {"configurable": {"thread_id": str(uuid4())}}
+            for row, kind, payload in self.session.transcript():
+                if kind == 'message':
+                    self.add(payload['role'], payload['text'])
+                    if payload['role'] == 'you':
+                        self.composer.buffer.history.append_string(payload['text'])
+                elif kind == 'clear':
+                    self.fragments.clear()
+                    self.progress.clear()
+                elif kind == 'progress':
+                    progress = ResponseProgress.restore(len(self.fragments), self.refresh_progress, payload)
+                    progress.storage_id = row
+                    if not progress.finished:
+                        progress.finished = True
+                        progress.stage = 'Interrupted'
+                        progress.events.append({'tool': None, 'text': 'Interrupted by Moska exit', 'details': ''})
+                        self.session.update(row, progress.snapshot())
+                    self.fragments.append(('', ''))
+                    self.progress.append(progress)
         finally:
-            self.activity = self.idle_activity
-            self.app.invalidate()
+            self._restoring = False
+        self.refresh_progress()
 

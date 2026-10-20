@@ -6,6 +6,7 @@ The external decomposer and its evolved tools/prompts remain untouched.
 
 import asyncio
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,7 @@ import httpx
 
 from .codex import CodexError, CodexServer
 from .registry import AgentSettingsError, require_codex
+from .context import worker_operation
 
 
 class CodexWorkers:
@@ -23,23 +25,57 @@ class CodexWorkers:
         'url': 'http://codex.local',
     }
 
-    def __init__(self, workspace: Path, settings, *, on_event=None):
+    def __init__(self, workspace: Path, settings, *, on_event=None, storage=None):
         self.workspace = workspace.resolve()
         self.settings = settings
+        self.storage = storage
         self.on_event = on_event or (lambda thread, item: None)
         self.server = None
         self.start_lock = asyncio.Lock()
-        self.threads = {}
-        self.runs = {}
+        self.threads = storage.workers('codex', 'thread') if storage else {}
+        self.runs = storage.workers('codex', 'run') if storage else {}
+        self.loaded = set()
         self.active = {}
         self.start_tasks = set()
         self.closing = False
+        self.stopping = False
+        for run in list(self.runs.values()):
+            if run['status'] in ('pending', 'running'):
+                self._complete(run, {'status': 'interrupted', 'error': {
+                    'message': 'Moska exited before this run finished recording its result.'}})
+
+    def _save(self, kind, identifier, value):
+        if self.storage:
+            self.storage.save_worker('codex', kind, identifier, value)
+
+    def recover_operation(self, origin, record):
+        if record['name'] in ('new', 'fork'):
+            for identifier, thread in self.threads.items():
+                if thread.get('origin') == origin:
+                    agent = {'agent_id': identifier, 'thread_id': identifier, 'agent_type_id': 'codex',
+                             'assistant_id': 'codex', 'created_at': thread['created_at']}
+                    if thread.get('forked_from'):
+                        agent['forked_from'] = thread['forked_from']
+                    return {'agents': {identifier: agent}}, {'agent_id': identifier}
+        if record['name'] == 'run':
+            for identifier, run in self.runs.items():
+                if run.get('origin') == origin:
+                    # Let the existing wait tool collect the saved terminal result.
+                    agent_run = {'agent_run_id': identifier, 'run_id': identifier, 'agent_id': run['thread_id'],
+                                 'prompt': run['prompt'], 'started_at': run['started_at'], 'status': 'pending'}
+                    return {'agent_runs': {identifier: agent_run}}, {'agent_run_id': identifier}
+        return None
+
+    async def _ensure_loaded(self, server, thread_id):
+        if thread_id not in self.loaded:
+            await server.request('thread/resume', {'threadId': thread_id, **self._thread_options()})
+            self.loaded.add(thread_id)
 
     async def _server(self):
         if 'codex' not in self.settings.enabled():
             raise CodexError('Codex is disabled. Enable it with /agents first.')
         async with self.start_lock:
-            if self.closing:
+            if self.closing or self.stopping:
                 raise CodexError('Codex workers are stopping.')
             if self.server is None:
                 executable = await asyncio.to_thread(require_codex)
@@ -50,6 +86,18 @@ class CodexWorkers:
 
     def _thread_options(self):
         return {'cwd': str(self.workspace), 'approvalPolicy': 'never', 'sandbox': 'workspace-write'}
+
+    def processes(self):
+        rows = []
+        for agent_id, thread in self.threads.items():
+            runs = [run for run in self.runs.values() if run['thread_id'] == agent_id]
+            latest = max(runs, key=lambda run: run['started_at']) if runs else None
+            rows.append({'agent_id': agent_id, 'agent_type': 'codex', 'workspace': str(self.workspace),
+                         'status': latest['status'] if latest else 'idle',
+                         'prompt': latest['prompt'] if latest else '',
+                         'started_at': latest['started_at'] if latest else None,
+                         'finished_at': latest.get('finished_at') if latest else None})
+        return rows
 
     async def handle(self, request):
         try:
@@ -64,7 +112,10 @@ class CodexWorkers:
             server = await self._server()
             result = await server.request('thread/start', self._thread_options())
             thread_id = result['thread']['id']
-            self.threads[thread_id] = {'messages': [], 'error': None}
+            self.threads[thread_id] = {'messages': [], 'error': None, 'created_at': time.time(),
+                                       'origin': worker_operation.get()}
+            self.loaded.add(thread_id)
+            self._save('thread', thread_id, self.threads[thread_id])
             return httpx.Response(200, json={'thread_id': thread_id})
 
         thread_id = parts[1]
@@ -81,17 +132,24 @@ class CodexWorkers:
             result = await server.request('thread/fork', {'threadId': thread_id, **self._thread_options()})
             fork_id = result['thread']['id']
             self.threads[fork_id] = deepcopy(thread)
+            self.threads[fork_id].update(created_at=time.time(), forked_from=thread_id, origin=worker_operation.get())
+            self.loaded.add(fork_id)
+            self._save('thread', fork_id, self.threads[fork_id])
             return httpx.Response(200, json={'thread_id': fork_id})
         if parts[2:] == ['runs'] and request.method == 'POST':
             if thread_id in self.active:
                 raise CodexError('This Codex agent already has an active turn.')
             server = await self._server()
+            await self._ensure_loaded(server, thread_id)
             run_id = str(uuid4())
             before = thread['messages'] + body['input']['messages']
             run = {'run_id': run_id, 'thread_id': thread_id, 'status': 'pending',
-                   'turn_id': None, 'before': before, 'messages': [], 'items': {}, 'error': None}
+                   'turn_id': None, 'before': before, 'messages': [], 'items': {}, 'error': None,
+                   'prompt': body['input']['messages'][-1]['content'], 'started_at': time.time(),
+                   'origin': worker_operation.get()}
             self.runs[run_id] = run
             self.active[thread_id] = run
+            self._save('run', run_id, run)
             thread['error'] = None
             prompt = body['input']['messages'][-1]['content']
             task = asyncio.create_task(self._start_turn(server, run, prompt))
@@ -126,6 +184,7 @@ class CodexWorkers:
             run['turn_id'] = result['turn']['id']
             if run['status'] == 'pending':
                 run['status'] = 'running'
+            self._save('run', run['run_id'], run)
             if result['turn'].get('status') in ('completed', 'failed', 'interrupted'):
                 self._complete(run, result['turn'])
         except Exception as error:
@@ -135,6 +194,8 @@ class CodexWorkers:
         run = self.active.get(params.get('threadId'))
         if not run:
             return
+        if self.storage and method in ('turn/started', 'turn/completed', 'item/started', 'item/completed'):
+            self.storage.event('worker_event', {'runtime': 'codex', 'method': method, 'params': params})
         turn_id = params.get('turnId') or params.get('turn', {}).get('id')
         if run['turn_id'] is not None and turn_id is not None and turn_id != run['turn_id']:
             return
@@ -149,6 +210,7 @@ class CodexWorkers:
             self.on_event(run['thread_id'], params['item'])
         elif method == 'turn/completed':
             self._complete(run, params['turn'])
+        self._save('run', run['run_id'], run)
 
     def _complete(self, run, turn):
         if run['status'] in ('success', 'error', 'interrupted'):
@@ -178,10 +240,12 @@ class CodexWorkers:
         error = turn.get('error')
         if status == 'success' and not final.strip():
             status, error = 'error', {'message': 'Codex completed without a final response.'}
-        run.update(status=status, messages=messages, error=error)
+        run.update(status=status, messages=messages, error=error, finished_at=time.time())
         thread = self.threads[run['thread_id']]
         thread['messages'] = run['before'] + messages
         thread['error'] = error
+        self._save('run', run['run_id'], run)
+        self._save('thread', run['thread_id'], thread)
         self.active.pop(run['thread_id'], None)
 
     def _disconnected(self, error):

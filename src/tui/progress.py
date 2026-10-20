@@ -10,6 +10,41 @@ from prompt_toolkit.utils import get_cwidth
 TOOL_ICONS = {"new": "✦", "fork": "⑂", "run": "▶", "wait": "◷"}
 
 
+def prompt_lines(text, width, limit=3):
+    """Wrap a prompt into terminal columns while bounding the visible preview."""
+    width = max(1, width)
+    text = re.sub(r'[\x00-\x08\x0b-\x1f\x7f]', '', text).expandtabs(4)
+    lines = []
+    for logical in text.split('\n'):
+        while get_cwidth(logical) > width:
+            columns = 0
+            cut = 0
+            for char in logical:
+                if columns + get_cwidth(char) > width:
+                    break
+                columns += get_cwidth(char)
+                cut += 1
+            cut = max(1, cut)
+            space = logical.rfind(' ', 0, cut + 1)
+            if space > 0:
+                cut = space
+            lines.append(logical[:cut].rstrip())
+            logical = logical[cut:].lstrip()
+            if len(lines) > limit:
+                break
+        if len(lines) > limit:
+            break
+        lines.append(logical)
+        if len(lines) > limit:
+            break
+    if len(lines) > limit:
+        lines = lines[:limit]
+        while lines[-1] and get_cwidth(lines[-1] + '…') > width:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] += '…'
+    return lines
+
+
 class ResponseProgress:
     def __init__(self, index, changed):
         self.index = index
@@ -23,6 +58,21 @@ class ResponseProgress:
         self.runs = {}
         self.run_calls = {}
         self.model_requests = 0
+        self.storage_id = None
+        self.revision = 0
+        self.persisted_revision = -1
+
+    def snapshot(self):
+        return {'events': self.events, 'agents': sorted(self.agents), 'stage': self.stage,
+                'finished': self.finished, 'model_requests': self.model_requests}
+
+    @classmethod
+    def restore(cls, index, changed, payload):
+        progress = cls(index, changed)
+        for key in ('events', 'stage', 'finished', 'model_requests'):
+            setattr(progress, key, payload[key])
+        progress.agents = set(payload['agents'])
+        return progress
 
     def record(self, text, stage=None):
         self.events.append({"tool": None, "text": text, "details": ""})
@@ -30,6 +80,7 @@ class ResponseProgress:
 
     def set_stage(self, stage):
         self.stage = stage
+        self.revision += 1
         self.changed()
 
     def finish(self, stage):
@@ -50,6 +101,7 @@ class ResponseProgress:
             "tool": call["name"],
             "text": (f"agent {agent[:8]} · " if agent else "") + "queued",
             "details": "Prompt: " + self.preview(args["prompt"]) if args.get("prompt") else "",
+            "prompt": args.get('prompt') if call['name'] == 'run' else None,
             "status": "queued",
         }
         if agent:
@@ -96,6 +148,7 @@ class ResponseProgress:
             count = len(collected)
             event["text"] = f"collected {count} report{'s' if count != 1 else ''}"
             event["details"] = "\n".join(collected)
+        self.revision += 1
         self.changed()
 
     def render(self, expanded, width=80):
@@ -123,13 +176,15 @@ class ResponseProgress:
 
         for event in events:
             tool = event["tool"]
-            icon = TOOL_ICONS.get(tool, "·") if tool else {"Responded": "✓", "Interrupted": "■", "Failed": "!"}.get(event["text"], "·")
+            icon = TOOL_ICONS.get(tool, "·") if tool else {"Responded": "✓", "Interrupted": "■", "Steered": "↪", "Failed": "!"}.get(event["text"], "·")
             fragments.append(("class:muted", "    " + icon + " "))
             if tool:
                 fragments.append(("class:tool", tool + "  "))
             text_fragments(event["text"], "class:muted", get_cwidth("    " + icon + " ") + (len(tool) + 2 if tool else 0))
-            if expanded and event["details"]:
-                for line in event["details"].splitlines():
+            if expanded and (event.get('prompt') or event['details']):
+                lines = (prompt_lines('Prompt: ' + event['prompt'], width - 8)
+                         if event.get('prompt') else event['details'].splitlines())
+                for line in lines:
                     fragments.append(("class:muted", "      ↳ "))
                     text_fragments(line, "class:muted", 8)
         fragments.append(("", "\n"))
