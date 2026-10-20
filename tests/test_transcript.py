@@ -1,14 +1,107 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from prompt_toolkit import Application
+from prompt_toolkit.application.current import set_app
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.input import DummyInput
+from prompt_toolkit.layout import FormattedTextControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.output import DummyOutput
 
 from tui.transcript import SelectableTranscript, copy_text
 
 
 def mouse(kind, x, y):
     return MouseEvent(Point(x, y), kind, MouseButton.LEFT, frozenset())
+
+
+class ContentCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.app = Application(input=DummyInput(), output=DummyOutput())
+        self.context = set_app(self.app)
+        self.context.__enter__()
+        self.addCleanup(self.context.__exit__, None, None, None)
+
+    def render(self, control, width=80):
+        self.app.render_counter += 1
+        return control.create_content(width, 20)
+
+    def test_100_message_scroll_reuses_lines_and_keeps_cursor_current(self):
+        fragments = [('class:moska', f'message {i}\n' + 'text\n' * 12)
+                     for i in range(100)]
+        position = Point(0, 0)
+        control = SelectableTranscript(
+            lambda: list(fragments), lambda: None, lambda text: None,
+            get_cursor_position=lambda: position, show_cursor=False,
+        )
+        original = FormattedTextControl.create_content
+        with patch.object(FormattedTextControl, 'create_content', autospec=True,
+                          side_effect=original) as prepare:
+            first = self.render(control)
+            for y in range(1, 101):
+                position = Point(0, y)
+                content = self.render(control)
+                # Height changes do not require splitting the transcript either.
+                self.assertEqual(control.create_content(80, 10).cursor_position, position)
+                self.assertEqual(content.cursor_position, position)
+                self.assertIs(content.get_line, first.get_line)
+                self.assertEqual(content.line_count, 1301)
+                self.assertFalse(content.show_cursor)
+            self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(first.cursor_position, Point(0, 0))
+        first.get_height_for_line(1, 80, None)
+        self.assertGreater(content.get_height_for_line(1, 80, lambda *_: ' ' * 79), 1)
+
+    def test_content_width_selection_and_handler_changes_match_base_control(self):
+        clicked = []
+        fragments = [('class:link', 'hello', clicked.append), ('', '\nworld\n')]
+        control = SelectableTranscript(lambda: fragments, lambda: None, lambda text: None)
+
+        def check(width=80):
+            content = self.render(control, width)
+            expected = FormattedTextControl(control.formatted_text).create_content(width, 20)
+            self.assertEqual(content.line_count, expected.line_count)
+            self.assertEqual(content.cursor_position, expected.cursor_position)
+            self.assertEqual(content.menu_position, expected.menu_position)
+            for i in range(content.line_count):
+                self.assertEqual(content.get_line(i), expected.get_line(i))
+                self.assertEqual(content.get_height_for_line(i, width, None),
+                                 expected.get_height_for_line(i, width, None))
+            return content
+
+        first = check()
+        check(3)
+        fragments.append(('bold', 'added\n'))
+        check()
+        # Activity updates can replace text without changing the fragment count.
+        fragments[-1] = ('bold', 'updated\nwith another line\n')
+        self.assertEqual(check().line_count, 5)
+        control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1, 0))
+        control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, 3, 1))
+        selected = check()
+        self.assertTrue(any('selected-text' in style
+                            for style, text in selected.get_line(0)))
+        control.anchor = control.end = None
+        check()
+        replacement = []
+        fragments[0] = ('class:link', 'hello', replacement.append)
+        check()
+        control.mouse_handler(mouse(MouseEventType.MOUSE_UP, 2, 0))
+        self.assertEqual(len(replacement), 1)
+        self.assertEqual(clicked, [])
+        fragments.clear()
+        self.assertEqual(check().line_count, 1)
+        self.assertEqual(first.line_count, 3)
+
+    def test_cursor_and_menu_markers_are_preserved(self):
+        fragments = [('', 'hello\n'), ('[SetCursorPosition]', ''),
+                     ('', 'world'), ('[SetMenuPosition]', '')]
+        control = SelectableTranscript(lambda: fragments, lambda: None, lambda text: None)
+        for _ in range(2):
+            content = self.render(control)
+            self.assertEqual(content.cursor_position, Point(0, 1))
+            self.assertEqual(content.menu_position, Point(5, 1))
 
 
 class SelectionTests(unittest.TestCase):

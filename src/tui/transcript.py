@@ -5,6 +5,7 @@ import shutil
 import sys
 
 from prompt_toolkit.layout import FormattedTextControl
+from prompt_toolkit.layout.controls import UIContent
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 
 
@@ -44,7 +45,32 @@ class SelectableTranscript(FormattedTextControl):
         self.end = None
         self.dragging = False
         self.snapshot = ''
+        self._prepared_key = None
+        self._prepared_content = None
         super().__init__(self.formatted_text, **kwargs)
+
+    def create_content(self, width, height):
+        # FormattedTextControl splits every fragment into lines before consulting
+        # its content cache. Layout calls this several times per redraw, and
+        # scrolling changes the cursor without changing any of those lines.
+        fragments = self._get_formatted_text_cached()
+        key = (tuple(fragments), width)
+        if key != self._prepared_key:
+            self._prepared_content = super().create_content(width, height)
+            self._prepared_key = key
+            cursor = self._prepared_content.cursor_position
+        else:
+            cursor = (self.get_cursor_position() if self.get_cursor_position
+                      else self._prepared_content.cursor_position)
+        self._fragments = fragments
+        # Reuse lines, but keep cursor and per-render line-height caches local.
+        # Retaining the latter would accumulate entries for every render counter.
+        prepared = self._prepared_content
+        return UIContent(
+            get_line=prepared.get_line, line_count=prepared.line_count,
+            cursor_position=cursor, menu_position=prepared.menu_position,
+            show_cursor=prepared.show_cursor,
+        )
 
     @staticmethod
     def offset(text, point):
