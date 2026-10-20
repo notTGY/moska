@@ -19,8 +19,9 @@ class WorkerCommands:
 
     def show_processes(self):
         rows = self.worker_runtime.processes() if self.worker_runtime else []
+        rows = [row for row in rows if row['status'] in ('pending', 'running')]
         if not rows:
-            self.add('system', 'No local agents have been created in this workspace.')
+            self.add('system', 'No local agents are running in this workspace.')
             return
         # Snapshot, so users can select/copy a stable full prompt.
         lines = [self.worker_counter]

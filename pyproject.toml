@@ -1,6 +1,6 @@
 [project]
 name = "moska"
-version = "0.0.1"
+version = "0.0.2"
 description = "A terminal orchestrator for local Codex agents"
 readme = "README.md"
 requires-python = ">=3.13"

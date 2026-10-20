@@ -2,7 +2,6 @@
 
 import asyncio
 import re
-import webbrowser
 from uuid import uuid4
 
 from prompt_toolkit import Application
@@ -18,7 +17,6 @@ from prompt_toolkit.layout import (
 )
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Label, TextArea
 
@@ -28,6 +26,7 @@ from tui.configuration import ConfigurationDialogs
 from tui.transcript import SelectableTranscript, copy_text
 from tui.progress import ResponseProgress
 from tui.conversation import Conversation
+from tui.markdown import markdown_fragments, plain_fragments
 from tui.jobs import WorkerCommands
 
 
@@ -102,6 +101,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
         )
         self.transcript = SelectableTranscript(
             self.render_transcript, lambda: self.app.invalidate(), self.copy_selection,
+            scroll=self.scroll_transcript,
             get_cursor_position=lambda: Point(x=0, y=self.cursor_line),
             show_cursor=False,
         )
@@ -193,13 +193,11 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
 
         @keys.add("pageup")
         def scroll_up(event):
-            self.follow_output = False
-            self.cursor_line = max(0, self.cursor_line - 10)
+            self.scroll_transcript(-10)
 
         @keys.add("pagedown")
         def scroll_down(event):
-            self.cursor_line = min(self.last_line, self.cursor_line + 10)
-            self.follow_output = self.cursor_line == self.last_line
+            self.scroll_transcript(10)
 
         body = HSplit([
             Window(FormattedTextControl([
@@ -215,7 +213,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 Window(height=1, style="class:composer"),
             ], style="class:composer"),
             Window(FormattedTextControl(lambda: [
-                ("class:muted", "  Enter send · Shift+Enter newline · Ctrl+T details · Esc pause"),
+                ("class:muted", "  Enter send · Shift+Enter newline · PgUp/PgDn scroll · Ctrl+T details · Esc pause"),
             ]), height=1),
             VSplit([
                 Window(FormattedTextControl(lambda: [("class:accent", "  " + self.activity)])),
@@ -238,6 +236,9 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 "moska": "#a6d8cc bold",
                 "system": "#d8b98c",
                 "link": "#9dbfe5 underline",
+                "markdown-heading": "#a6d8cc bold",
+                "markdown-quote": "#aaaaaa italic",
+                "markdown-code": "#d8b98c",
                 "composer": "bg:#292929 #eeeeee",
                 "completion-menu": "bg:#292929 #dddddd",
                 "completion-menu.completion.current": "bg:#444444 #ffffff",
@@ -310,23 +311,18 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
     def last_line(self):
         return max(0, sum(fragment[1].count("\n") for fragment in self.render_transcript()) - 1)
 
+    def scroll_transcript(self, lines):
+        self.cursor_line = max(0, min(self.last_line, self.cursor_line + lines))
+        self.follow_output = lines > 0 and self.cursor_line == self.last_line
+        self.app.invalidate()
+
     def add(self, role, text):
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
         if self.session and not self._restoring:
             self.session.append('message', {'role': role, 'text': text})
         self.fragments.append((f"class:{role}", role + "\n"))
-        start = 0
-        for match in re.finditer(r"https?://[^\s<>]+", text):
-            self.fragments.append(("", text[start:match.start()]))
-            url = match[0]
-
-            def open_link(event, url=url):
-                if event.event_type == MouseEventType.MOUSE_UP:
-                    webbrowser.open(url)
-
-            self.fragments.append(("class:link", url, open_link))
-            start = match.end()
-        self.fragments.append(("", text[start:] + "\n\n"))
+        self.fragments.extend(markdown_fragments(text) if role == 'moska' else plain_fragments(text))
+        self.fragments.append(("", "\n\n"))
         if self.follow_output:
             self.cursor_line = self.last_line
         self.app.invalidate()

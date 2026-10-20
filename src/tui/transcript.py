@@ -35,10 +35,11 @@ async def copy_text(text):
 
 
 class SelectableTranscript(FormattedTextControl):
-    def __init__(self, text, changed, copy, **kwargs):
+    def __init__(self, text, changed, copy, *, scroll=None, **kwargs):
         self.source = text
         self.changed = changed
         self.copy = copy
+        self.scroll = scroll
         self.anchor = None
         self.end = None
         self.dragging = False
@@ -81,6 +82,9 @@ class SelectableTranscript(FormattedTextControl):
         return result
 
     def mouse_handler(self, event):
+        if self.scroll and event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            self.scroll(-3 if event.event_type == MouseEventType.SCROLL_UP else 3)
+            return None
         if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
             self.snapshot = ''.join(fragment[1] for fragment in self.source())
             self.anchor = self.end = self.offset(self.snapshot, event.position)

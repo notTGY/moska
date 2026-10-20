@@ -12,6 +12,19 @@ def mouse(kind, x, y):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_wheel_scrolls_even_over_a_link_without_changing_selection(self):
+        clicked, scrolled = [], []
+        control = SelectableTranscript(
+            lambda: [('', 'link', clicked.append)], lambda: None, lambda text: None,
+            scroll=scrolled.append,
+        )
+        control.create_content(80, 20)
+        for kind in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+            self.assertIsNone(control.mouse_handler(mouse(kind, 1, 0)))
+        self.assertEqual(scrolled, [-3, 3])
+        self.assertEqual(clicked, [])
+        self.assertIsNone(control.anchor)
+
     def test_drag_selects_multiline_text_and_copies_on_release(self):
         copied = []
         control = SelectableTranscript(lambda: [('', 'hello\nworld')], lambda: None, copied.append)
