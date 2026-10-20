@@ -264,6 +264,8 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
             self.activate_model()
             self.activity = self.idle_activity
         except ConnectionError as error:
+            self.account = None
+            self.activate_model()
             self.add("system", str(error))
 
     @property

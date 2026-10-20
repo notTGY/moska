@@ -19,6 +19,7 @@ from orchestrator.storage import SessionBusyError, SessionStore
 from tui.app import ChatUI
 from test_compaction import RecordingModel
 from test_codex_bridge import FAKE_CODEX, ToolCycle
+from test_model_ui import FakeConnection
 from adapters.agents import AgentSettings
 from decomposer import core
 
@@ -130,6 +131,26 @@ class SessionResumeTests(unittest.IsolatedAsyncioTestCase):
                     answer = json.loads(workers.threads[worker]['messages'][-1]['content'])
                     self.assertEqual(answer['previous'], ['slow-start'])
                     self.assertEqual(len(workers.threads), 1)
+
+    async def test_demo_mode_does_not_discard_saved_real_model_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            connection = FakeConnection()
+            connection.model = 'first'
+            with patch('adapters.providers.registry.OpenAIConnection', return_value=connection):
+                async with OrchestratorRuntime(workspace, data_dir=workspace / 'data') as runtime:
+                    with create_pipe_input() as pipe:
+                        ui = ChatUI(runtime.create_agent(DemoCoordinator()), session=runtime.session,
+                                    agent_factory=runtime.create_agent, input=pipe, output=DummyOutput())
+                        real = ui.config
+                        await ui.agent.aupdate_state(real, {'messages': [HumanMessage(content='real context')], 'agents': {}, 'agent_runs': {}}, as_node='tools')
+                        connection.model = None
+                        ui.activate_model()
+                        self.assertNotEqual(ui.config, real)
+                        connection.model = 'first'
+                        ui.activate_model()
+                        self.assertEqual(ui.config, real)
+                        self.assertEqual((await ui.agent.aget_state(real)).values['messages'][0].text, 'real context')
 
     async def test_ui_restores_messages_links_progress_and_stable_thread(self):
         with tempfile.TemporaryDirectory() as directory:

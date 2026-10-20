@@ -141,6 +141,8 @@ class CodexWorkers:
                 raise CodexError('This Codex agent already has an active turn.')
             server = await self._server()
             await self._ensure_loaded(server, thread_id)
+            if self.stopping or self.closing:
+                raise CodexError('Codex workers are stopping.')
             run_id = str(uuid4())
             before = thread['messages'] + body['input']['messages']
             run = {'run_id': run_id, 'thread_id': thread_id, 'status': 'pending',

@@ -18,7 +18,14 @@ class ConfigurationDialogs:
         self.reasoning_effort = self.connection.selected_reasoning_effort() if self.model else None
         if self.agent_factory:
             demo = not bool(self.model)
-            if demo != self.demo_mode:
+            if self.session:
+                mode = 'demo' if demo else 'real'
+                threads = self.session.meta('thread_ids', {})
+                if mode not in threads:
+                    threads[mode] = self.config['configurable']['thread_id'] if demo == self.demo_mode else str(uuid4())
+                self.config = {'configurable': {'thread_id': threads[mode]}}
+                self.session.set_meta('thread_ids', threads)
+            elif demo != self.demo_mode:
                 # Demo checkpoints contain fictitious workers, not Codex threads.
                 self.config = {"configurable": {"thread_id": str(uuid4())}}
             self.demo_mode = demo

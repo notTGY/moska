@@ -79,7 +79,8 @@ class ResponseProgress:
         self.set_stage(stage or self.stage)
 
     def set_stage(self, stage):
-        self.stage = stage
+        if not self.finished or stage in ('Responded', 'Interrupted', 'Failed', 'Steered'):
+            self.stage = stage
         self.revision += 1
         self.changed()
 

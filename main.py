@@ -23,6 +23,8 @@ def main():
             try:
                 fd = os.open(args.export_session, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
                 with os.fdopen(fd, 'w') as output:
+                    if os.name == 'posix':
+                        os.fchmod(output.fileno(), 0o600)
                     json.dump(session.export(), output, ensure_ascii=False, indent=2)
             finally:
                 session.close()

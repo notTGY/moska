@@ -46,10 +46,10 @@ class WorkerCommands:
             if running and not running.done():
                 running.cancel()
                 await asyncio.gather(running, return_exceptions=True)
-            if self.prepare_turn:
-                await self.prepare_turn(self.agent, self.config)
             count = self.worker_runtime.running_count
             await self.worker_runtime.interrupt_all()
+            if self.prepare_turn:
+                await self.prepare_turn(self.agent, self.config)
             self.add('system', f'Stopped {count} background agent' + ('s.' if count != 1 else '.'))
             if self.session:
                 self.session.event('stop_workers', {'count': count})
