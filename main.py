@@ -1,4 +1,4 @@
-"""Small chat UI using the real decomposer with an entirely local demo backend."""
+"""Terminal chat for the decomposer with a mock worker transport."""
 
 import asyncio
 import json
@@ -9,6 +9,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -29,6 +30,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Dialog, Label, RadioList, TextArea
 
 from decomposer import create_decomposer_agent
@@ -119,6 +121,182 @@ class MockWorkers:
         return httpx.Response(404, json={"error": "Unknown mock endpoint"})
 
 
+TOOL_ICONS = {"new": "✦", "fork": "⑂", "run": "▶", "wait": "◷"}
+
+
+class ResponseProgress:
+    def __init__(self, index, changed):
+        self.index = index
+        self.changed = changed
+        self.finished = False
+        self.stage = "Preparing request"
+        self.events = []
+        self.requests = {}
+        self.tools = {}
+        self.agents = set()
+        self.runs = {}
+        self.run_calls = {}
+        self.model_requests = 0
+
+    def record(self, text, stage=None):
+        self.events.append({"tool": None, "text": text, "details": ""})
+        self.set_stage(stage or self.stage)
+
+    def set_stage(self, stage):
+        self.stage = stage
+        self.changed()
+
+    def finish(self, stage):
+        self.finished = True
+        self.record(stage, stage)
+
+    @staticmethod
+    def preview(text):
+        text = " ".join(str(text).split())
+        return text if len(text) <= 240 else text[:237] + "…"
+
+    def requested(self, call):
+        if call["id"] in self.requests:
+            return
+        args = call["args"]
+        agent = args.get("agent_id")
+        event = {
+            "tool": call["name"],
+            "text": (f"agent {agent[:8]} · " if agent else "") + "queued",
+            "details": "Prompt: " + self.preview(args["prompt"]) if args.get("prompt") else "",
+            "status": "queued",
+        }
+        if agent:
+            self.agents.add(agent)
+        self.requests[call["id"]] = event
+        self.events.append(event)
+        self.set_stage("Dispatching tools")
+
+    def state_update(self, update):
+        calls = [
+            self.requests[message.tool_call_id]
+            for message in update.get("messages", [])
+            if isinstance(message, ToolMessage) and message.tool_call_id in self.requests
+        ]
+        event = calls[0] if len(calls) == 1 else None
+        for agent_id, agent in update.get("agents", {}).items():
+            if agent_id in self.agents:
+                continue
+            self.agents.add(agent_id)
+            source = agent.get("forked_from")
+            text = f"agent {agent_id[:8]} · from agent {source[:8]}" if source else f"agent {agent_id[:8]} · created"
+            if event:
+                event["text"] = text
+            else:
+                self.events.append({"tool": "fork" if source else "new", "text": text, "details": ""})
+        collected = []
+        for run_id, run in update.get("agent_runs", {}).items():
+            self.agents.add(run["agent_id"])
+            marker = (run["status"], "response_sequence_number" in run)
+            if self.runs.get(run_id) == marker:
+                continue
+            self.runs[run_id] = marker
+            if event and event["tool"] == "run":
+                self.run_calls[run_id] = event
+                event["text"] = f"agent {run['agent_id'][:8]} · running"
+            if marker[1]:
+                run_event = self.run_calls.get(run_id)
+                if run_event:
+                    label = "report ready" if run["status"] == "responded" else run["status"]
+                    run_event["text"] = f"agent {run['agent_id'][:8]} · {label}"
+                report = run.get("response") or run.get("error") or run["status"]
+                collected.append(f"agent {run['agent_id'][:8]}: {self.preview(report)}")
+        if collected and event and event["tool"] == "wait":
+            count = len(collected)
+            event["text"] = f"collected {count} report{'s' if count != 1 else ''}"
+            event["details"] = "\n".join(collected)
+        self.changed()
+
+    def render(self, expanded, width=80):
+        events = list(self.events)
+        if not self.finished and self.stage in ("Waiting for model", "Preparing answer"):
+            events.append({"tool": None, "text": self.stage, "details": ""})
+        if not expanded:
+            events = events[-3:]
+        fragments = [("class:muted", "  Activity · Ctrl+T " + ("collapse" if expanded else "expand") + "\n")]
+        ids = {agent[:8] for agent in self.agents}
+        pattern = re.compile(r"agent (?:" + "|".join(re.escape(value) for value in ids) + r")\b") if ids else None
+
+        def text_fragments(text, style, prefix_width):
+            text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
+            # Keep activity rows to one terminal line, including wide glyphs.
+            while text and get_cwidth(text) > max(1, width - prefix_width):
+                text = text[:-2] + "…"
+            start = 0
+            if pattern:
+                for match in pattern.finditer(text):
+                    fragments.append((style, text[start:match.start()]))
+                    fragments.append(("class:agent", match[0]))
+                    start = match.end()
+            fragments.append((style, text[start:] + "\n"))
+
+        for event in events:
+            tool = event["tool"]
+            icon = TOOL_ICONS.get(tool, "·") if tool else {"Responded": "✓", "Interrupted": "■", "Failed": "!"}.get(event["text"], "·")
+            fragments.append(("class:muted", "    " + icon + " "))
+            if tool:
+                fragments.append(("class:tool", tool + "  "))
+            text_fragments(event["text"], "class:muted", get_cwidth("    " + icon + " ") + (len(tool) + 2 if tool else 0))
+            if expanded and event["details"]:
+                for line in event["details"].splitlines():
+                    fragments.append(("class:muted", "      ↳ "))
+                    text_fragments(line, "class:muted", 8)
+        fragments.append(("", "\n"))
+        return fragments
+
+
+class ProgressCallbacks(AsyncCallbackHandler):
+    def __init__(self, progress, model):
+        self.progress = progress
+        self.model = model
+
+    async def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.progress.model_requests += 1
+        self.progress.set_stage("Waiting for model")
+
+    async def on_llm_end(self, response, **kwargs):
+        for generations in response.generations:
+            for generation in generations:
+                message = generation.message
+                for call in message.tool_calls:
+                    self.progress.requested(call)
+                if message.text and not message.tool_calls:
+                    self.progress.set_stage("Preparing answer")
+
+    async def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
+        name = serialized.get("name", "tool")
+        event = next((event for event in self.progress.events
+                      if event["tool"] == name and event.get("status") == "queued"), None)
+        self.progress.tools[run_id] = event
+        if event:
+            event["status"] = "running"
+            event["text"] = event["text"].removesuffix("queued") + "running"
+        self.progress.set_stage("Waiting for subagents" if name == "wait" else f"Calling {name}")
+
+    async def on_tool_end(self, output, *, run_id, **kwargs):
+        update = getattr(output, "update", None)
+        if isinstance(update, dict):
+            self.progress.state_update(update)
+        event = self.progress.tools.get(run_id)
+        if event:
+            event["status"] = "done"
+            if event["tool"] != "run" and event["text"].endswith("running"):
+                event["text"] = event["text"].removesuffix("running") + "done"
+        self.progress.set_stage("Continuing orchestration")
+
+    async def on_tool_error(self, error, *, run_id, **kwargs):
+        event = self.progress.tools.get(run_id)
+        if event:
+            event["status"] = "failed"
+            event["text"] = "failed"
+        self.progress.set_stage("Handling tool error")
+
+
 COMMANDS = {
     "/connect": "Continue with ChatGPT",
     "/model": "Choose model and reasoning effort",
@@ -149,6 +327,9 @@ class ChatUI:
         self.pick_future = None
         self.config = {"configurable": {"thread_id": str(uuid4())}}
         self.fragments = []
+        self.progress = []
+        self.expanded_tools = False
+        self.follow_output = True
         self.cursor_line = 0
         self.task = None
         self.activity = "interface demo · mock workers"
@@ -159,7 +340,7 @@ class ChatUI:
             complete_while_typing=True, history=InMemoryHistory(),
         )
         self.transcript = FormattedTextControl(
-            lambda: self.fragments,
+            self.render_transcript,
             get_cursor_position=lambda: Point(x=0, y=self.cursor_line),
             show_cursor=False,
         )
@@ -173,7 +354,7 @@ class ChatUI:
                 return
             buffer.cancel_completion()
             text = buffer.text.strip()
-            if not text or (self.task and not self.task.done()):
+            if not text or (self.task and not self.task.done() and text != "/exit"):
                 return
             buffer.append_to_history()
             buffer.reset()
@@ -181,6 +362,8 @@ class ChatUI:
                 event.app.exit()
             elif text == "/clear":
                 self.fragments.clear()
+                self.progress.clear()
+                self.follow_output = True
                 self.cursor_line = 0
             elif text == "/connect" or text.startswith("/connect "):
                 self.task = event.app.create_background_task(self.connect(text.removeprefix("/connect").strip()))
@@ -191,12 +374,14 @@ class ChatUI:
                     f"{command}  {description}" for command, description in COMMANDS.items()
                 ) + "\n\nEach message runs a mock worker that reports hello.\n"
                     "Use /model to replace the demo coordinator with your selected model.\n"
+                    "Ctrl+T shows tool activity. Esc interrupts a response; /exit works while busy.\n"
                     "/connect opens ChatGPT sign-in; /connect new adds an account.\n"
                     "/connect accounts lists saved accounts; /connect 1 selects one.\n"
                     "https://python-prompt-toolkit.readthedocs.io/")
             elif text.startswith("/"):
                 self.add("system", "Unknown command. Type / to see available commands.")
             else:
+                self.follow_output = True
                 self.add("you", text)
                 self.task = event.app.create_background_task(self.respond(text))
 
@@ -204,6 +389,17 @@ class ChatUI:
         def dismiss(event):
             if not self.pick_future.done():
                 self.pick_future.set_result(None)
+
+        @keys.add("escape", filter=Condition(
+            lambda: self.picker is None and self.task is not None and not self.task.done()
+        ))
+        def interrupt(event):
+            self.task.cancel()
+
+        @keys.add("c-t")
+        def toggle_tools(event):
+            self.expanded_tools = not self.expanded_tools
+            self.refresh_progress()
 
         @keys.add("c-j", filter=has_focus(self.composer))
         def newline(event):
@@ -222,11 +418,13 @@ class ChatUI:
 
         @keys.add("pageup")
         def scroll_up(event):
+            self.follow_output = False
             self.cursor_line = max(0, self.cursor_line - 10)
 
         @keys.add("pagedown")
         def scroll_down(event):
             self.cursor_line = min(self.last_line, self.cursor_line + 10)
+            self.follow_output = self.cursor_line == self.last_line
 
         body = HSplit([
             Window(FormattedTextControl([
@@ -242,7 +440,7 @@ class ChatUI:
                 Window(height=1, style="class:composer"),
             ], style="class:composer"),
             Window(FormattedTextControl(lambda: [
-                ("class:muted", "  Enter send · Shift+Enter newline · / commands · Ctrl+D quit"),
+                ("class:muted", "  Enter send · Shift+Enter newline · Ctrl+T details · Esc interrupt"),
             ]), height=1),
             Window(FormattedTextControl(lambda: [
                 ("class:accent", "  " + self.activity),
@@ -257,6 +455,8 @@ class ChatUI:
                 "brand": "#a6d8cc bold",
                 "accent": "#a6d8cc",
                 "muted": "#888888",
+                "tool": "bold",
+                "agent": "#a6d8cc bold",
                 "you": "#eeeeee bold",
                 "moska": "#a6d8cc bold",
                 "system": "#d8b98c",
@@ -420,9 +620,25 @@ class ChatUI:
             self.activity = self.idle_activity
             self.app.invalidate()
 
+    def render_transcript(self):
+        progress = {item.index: item for item in self.progress}
+        fragments = []
+        width = self.app.output.get_size().columns - 4
+        for index, fragment in enumerate(self.fragments):
+            if index in progress:
+                fragments.extend(progress[index].render(self.expanded_tools, width))
+            else:
+                fragments.append(fragment)
+        return fragments
+
+    def refresh_progress(self):
+        if self.follow_output:
+            self.cursor_line = self.last_line
+        self.app.invalidate()
+
     @property
     def last_line(self):
-        return max(0, sum(fragment[1].count("\n") for fragment in self.fragments) - 1)
+        return max(0, sum(fragment[1].count("\n") for fragment in self.render_transcript()) - 1)
 
     def add(self, role, text):
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
@@ -439,31 +655,38 @@ class ChatUI:
             self.fragments.append(("class:link", url, open_link))
             start = match.end()
         self.fragments.append(("", text[start:] + "\n\n"))
-        self.cursor_line = self.last_line
+        if self.follow_output:
+            self.cursor_line = self.last_line
         self.app.invalidate()
 
     async def respond(self, prompt):
-        self.activity = "working… · Ctrl+C to cancel"
+        progress = ResponseProgress(len(self.fragments), self.refresh_progress)
+        self.fragments.append(("", ""))
+        self.progress.append(progress)
+        progress.record("Message received", "Preparing request")
+        self.activity = "working… · Esc interrupt · /exit quit"
+        callbacks = ProgressCallbacks(progress, self.model or "scripted demo")
         try:
             async for update in self.agent.astream(
                 {"messages": [HumanMessage(content=prompt)], "agents": {}, "agent_runs": {}},
-                config=self.config, stream_mode="updates",
+                config={**self.config, "callbacks": [callbacks]}, stream_mode="updates",
             ):
                 for value in update.values():
                     if not isinstance(value, dict):
                         continue
+                    progress.state_update(value)
                     for message in value.get("messages", []):
-                        if isinstance(message, AIMessage):
-                            for call in message.tool_calls:
-                                self.activity = f"{call['name']} · mock worker"
-                            if message.content and not message.tool_calls:
-                                self.add("moska", message.text)
+                        if isinstance(message, AIMessage) and message.content and not message.tool_calls:
+                            self.add("moska", message.text)
                 self.app.invalidate()
+            progress.finish("Responded")
         except asyncio.CancelledError:
-            self.add("system", "Cancelled.")
+            progress.finish("Interrupted")
+            self.add("system", "Interrupted.")
             self.config = {"configurable": {"thread_id": str(uuid4())}}
             raise
         except Exception as error:
+            progress.finish("Failed")
             self.add("system", f"Error: {error}")
             self.config = {"configurable": {"thread_id": str(uuid4())}}
         finally:
