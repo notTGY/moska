@@ -1,6 +1,6 @@
 # moska
 
-Control multiple Codex agents from one terminal orchestrator.
+Control multiple agents from one terminal orchestrator.
 
 Build with [uv](https://docs.astral.sh/uv/):
 
