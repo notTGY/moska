@@ -13,6 +13,7 @@ dependencies = [
     "langsmith>=0.14.11",
     "prompt-toolkit>=3.0.53",
     "pydantic>=2.14.1",
+    "pyjwt[crypto]>=2.15.1",
     "typing-extensions>=4.16.0",
 ]
 
