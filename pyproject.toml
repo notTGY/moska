@@ -1,7 +1,23 @@
 [project]
 name = "moska"
 version = "0.1.0"
-description = "Add your description here"
+description = "A terminal orchestrator for local Codex agents"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "langchain>=1.4.6",
+    "langchain-core>=1.6.12",
+    "langgraph>=1.2.16",
+    "langgraph-sdk>=0.4.8",
+    "langsmith>=0.14.11",
+    "pydantic>=2.14.1",
+    "typing-extensions>=4.16.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
