@@ -239,8 +239,11 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 "link": "#92c7ff underline",
                 "markdown-heading": "#2fbead bold",
                 "markdown-quote": "#909393 italic",
-                "markdown-code": "#ffffff",
-                "composer": "bg:#005a60 #ffffff",
+                "markdown-strong": "#3debcb bold",
+                "markdown-emphasis": "#84e0d5 italic",
+                "markdown-code": "#84e0d5",
+                # Muted green-charcoal keeps the input distinct without a blue cast.
+                "composer": "bg:#24332f #ffffff",
                 "completion-menu": "bg:#005a60 #ffffff",
                 "completion-menu.completion.current": "bg:#066d74 #ffffff noreverse",
                 "completion-menu.meta.completion": "bg:#005a60 #ffffff",

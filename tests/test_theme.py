@@ -6,6 +6,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from tui.app import ChatUI
+from tui.markdown import markdown_fragments
 
 
 def contrast(foreground, background):
@@ -37,7 +38,8 @@ class ThemeTests(unittest.TestCase):
             ('brand', '2fbead'), ('agent', '2fbead'), ('moska', '2fbead'),
             ('markdown-heading', '2fbead'), ('accent', '84e0d5'),
             ('muted', '909393'), ('markdown-quote', '909393'),
-            ('link', '92c7ff'), ('system', 'ffffff'), ('markdown-code', 'ffffff'),
+            ('link', '92c7ff'), ('system', 'ffffff'), ('markdown-code', '84e0d5'),
+            ('markdown-strong', '3debcb'), ('markdown-emphasis', '84e0d5'),
         ):
             with self.subTest(role=role):
                 self.assertEqual(self.attrs('class:' + role).color, color)
@@ -47,7 +49,7 @@ class ThemeTests(unittest.TestCase):
 
     def test_interactive_surfaces_keep_readable_brand_colors(self):
         for classes, background in (
-            ('class:composer', '005a60'),
+            ('class:composer', '24332f'),
             ('class:completion-menu.completion', '005a60'),
             ('class:completion-menu.meta.completion', '005a60'),
             ('class:completion-menu.completion.current', '066d74'),
@@ -74,6 +76,33 @@ class ThemeTests(unittest.TestCase):
         disabled = self.attrs('class:agent-option.focused class:agent-option.disabled')
         self.assertTrue(disabled.italic)
         self.assertTrue(disabled.underline)
+
+    def test_rendered_markdown_has_distinct_readable_styles(self):
+        source = ('Plain **strong** *emphasis* `inline`\n'
+                  '# Heading\n> Quote\n```python\nprint("code")\n```\n'
+                  '    indented code\n')
+        fragments = markdown_fragments(source)
+        self.assertEqual(''.join(fragment[1] for fragment in fragments), source)
+        for text, color, bold, italic in (
+            ('Plain ', 'ffffff', False, False),
+            ('**strong**', '3debcb', True, False),
+            ('*emphasis*', '84e0d5', False, True),
+            ('`inline`', '84e0d5', False, False),
+            ('# Heading\n', '2fbead', True, False),
+            ('> Quote\n', '909393', False, True),
+            ('```python\n', '84e0d5', False, False),
+            ('print("code")\n', '84e0d5', False, False),
+            ('```\n', '84e0d5', False, False),
+            ('    indented code\n', '84e0d5', False, False),
+        ):
+            with self.subTest(text=text):
+                style = next(fragment[0] for fragment in fragments if fragment[1] == text)
+                attrs = self.attrs(style)
+                self.assertEqual((attrs.color, attrs.bold, attrs.italic), (color, bold, italic))
+                self.assertGreaterEqual(contrast(attrs.color, attrs.bgcolor), 4.5)
+                selected = self.attrs(style + ' class:selected-text')
+                self.assertEqual((selected.color, selected.bgcolor), ('ffffff', '005a60'))
+                self.assertFalse(selected.reverse)
 
 
 if __name__ == '__main__':

@@ -42,7 +42,7 @@ class MarkdownTests(unittest.TestCase):
         self.assertEqual(''.join(item[1] for item in fragments), REPORT)
         for style, text in (
             ('markdown-heading', '# Results\n'),
-            ('bold', '**Passed**'), ('italic', '*notes*'),
+            ('markdown-strong', '**Passed**'), ('markdown-emphasis', '*notes*'),
             ('markdown-code', '`literal **code**`'),
             ('markdown-quote', '> A qualification\n'),
         ):
@@ -59,7 +59,8 @@ class MarkdownTests(unittest.TestCase):
                        '  text\n\n    indented **code**\n', 'no trailing newline'):
             with self.subTest(source=source):
                 self.assertEqual(''.join(item[1] for item in markdown_fragments(source)), source)
-        self.assertFalse(any('italic' in item[0] for item in markdown_fragments('\\*escaped* snake_case')))
+        self.assertFalse(any('markdown-emphasis' in item[0]
+                             for item in markdown_fragments('\\*escaped* snake_case')))
 
     def test_links_open_destination_and_never_execute_other_schemes(self):
         fragments = markdown_fragments(

@@ -75,7 +75,8 @@ def markdown_fragments(text):
             elif match['link'] or match['url']:
                 fragments.append(link_fragment(match[0], match['target'] or match['url'], style))
             else:
-                fragments.append((style + (' bold' if match['strong'] else ' italic'), match[0]))
+                fragments.append((style + (' class:markdown-strong' if match['strong']
+                                           else ' class:markdown-emphasis'), match[0]))
             start = match.end()
         fragments.append((style, line[start:]))
     return fragments
