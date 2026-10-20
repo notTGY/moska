@@ -9,7 +9,7 @@ from langgraph_sdk.client import LangGraphClient
 from adapters.providers.openai import ConnectionError, OpenAIConnection
 from adapters.providers.openai_model import ChatGPTModel
 from decomposer import create_decomposer_agent
-from main import MockWorkers
+from orchestrator.demo import MockWorkers
 
 REAL_CLIENT = httpx.AsyncClient
 

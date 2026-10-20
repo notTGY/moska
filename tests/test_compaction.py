@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import httpx
 from langgraph_sdk.client import LangGraphClient
-from main import DemoCoordinator, MockWorkers
+from orchestrator.demo import DemoCoordinator, MockWorkers
 from decomposer import create_decomposer_agent
 
 from langchain.agents import create_agent

@@ -7,7 +7,8 @@ from prompt_toolkit.output import DummyOutput
 
 from adapters.providers.openai import Account, OpenAIConnection
 from adapters.providers.openai_model import ChatGPTModel
-from main import ChatUI, DemoCoordinator
+from tui.app import ChatUI
+from orchestrator.demo import DemoCoordinator
 
 
 class FakeConnection(OpenAIConnection):

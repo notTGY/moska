@@ -85,7 +85,9 @@ class AgentSelector:
                 style += ' class:agent-option.disabled'
             checked = 'x' if entry.spec.agent_id in self.selected else ' '
             marker = f'[{checked}]' if entry.available else '[-]'
-            status = 'installed' if entry.available else 'not installed'
+            status = 'installed' if entry.available else ('update required' if entry.path else 'not installed')
+            if entry.version:
+                status += f' · {entry.version}'
 
             def mouse(event, index=index):
                 self.mouse(index, event)

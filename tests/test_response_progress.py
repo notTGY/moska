@@ -9,7 +9,8 @@ from prompt_toolkit.output import DummyOutput
 
 from adapters.providers.openai import OpenAIConnection
 from decomposer import create_decomposer_agent
-from main import ChatUI, DemoCoordinator, MockWorkers
+from tui.app import ChatUI
+from orchestrator.demo import DemoCoordinator, MockWorkers
 
 
 class Disconnected(OpenAIConnection):

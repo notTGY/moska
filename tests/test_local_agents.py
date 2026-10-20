@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,7 +12,7 @@ from prompt_toolkit.output import DummyOutput
 
 from adapters.agents.registry import AGENT_SPECS, AgentSettings, AgentSpec, DetectedAgent, scan_agents
 from adapters.providers.openai import OpenAIConnection
-from main import ChatUI
+from tui.app import ChatUI
 from tui.agents import AgentSelector
 
 
@@ -21,17 +22,19 @@ class Disconnected(OpenAIConnection):
 
 
 class AgentDetectionTests(unittest.TestCase):
-    def test_path_scan_and_registry_extension_do_not_launch_agents(self):
+    def test_scan_checks_minimum_version_without_starting_agent(self):
         second = AgentSpec('other', 'Other', 'other-agent', 'Install Other first.')
-        with patch('adapters.agents.registry.shutil.which', side_effect=['/bin/codex', None]) as which:
+        with patch('adapters.agents.registry.shutil.which', side_effect=['/bin/codex', None]) as which, patch('adapters.agents.registry.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'codex-cli 0.163.0\n')) as probe:
             found = scan_agents((*AGENT_SPECS, second))
         self.assertEqual([entry.available for entry in found], [True, False])
+        self.assertEqual(probe.call_args.args[0], ['/bin/codex', '--version'])
+        self.assertEqual(probe.call_args.kwargs['timeout'], 3)
         self.assertEqual([call.args[0] for call in which.call_args_list], ['codex', 'other-agent'])
         self.assertIn('codex login', found[0].hint)
         self.assertEqual(found[1].hint, second.setup_hint)
 
     def test_unavailable_entry_cannot_be_toggled_and_explains_setup_on_hover(self):
-        entries = [DetectedAgent(AGENT_SPECS[0], '/bin/codex'), DetectedAgent(
+        entries = [DetectedAgent(AGENT_SPECS[0], '/bin/codex', '0.163.0'), DetectedAgent(
             AgentSpec('other', 'Other', 'other-agent', 'Install Other and login first.'), None,
         )]
         selector = AgentSelector(entries, {'codex', 'other'}, lambda value: None, lambda: None)
@@ -49,8 +52,8 @@ class AgentSelectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_agents_command_scan_enable_save_and_restore(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = AgentSettings(Path(tmp) / 'agents.json')
-            entries = [DetectedAgent(AGENT_SPECS[0], '/bin/codex')]
-            with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), patch('main.AgentSettings', return_value=settings), patch('main.scan_agents', return_value=entries) as scan, create_pipe_input() as pipe:
+            entries = [DetectedAgent(AGENT_SPECS[0], '/bin/codex', '0.163.0')]
+            with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), patch('tui.app.AgentSettings', return_value=settings), patch('tui.configuration.scan_agents', return_value=entries) as scan, create_pipe_input() as pipe:
                 ui = ChatUI(None, input=pipe, output=DummyOutput())
                 task = asyncio.create_task(ui.app.run_async())
                 try:
@@ -86,7 +89,7 @@ class AgentSelectorTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = AgentSettings(Path(tmp) / 'agents.json')
             entries = [DetectedAgent(AGENT_SPECS[0], None)]
-            with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), patch('main.AgentSettings', return_value=settings), patch('main.scan_agents', return_value=entries), create_pipe_input() as pipe:
+            with patch('adapters.providers.registry.OpenAIConnection', return_value=Disconnected()), patch('tui.app.AgentSettings', return_value=settings), patch('tui.configuration.scan_agents', return_value=entries), create_pipe_input() as pipe:
                 ui = ChatUI(None, input=pipe, output=DummyOutput())
                 task = asyncio.create_task(ui.app.run_async())
                 try:

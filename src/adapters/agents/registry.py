@@ -2,10 +2,28 @@
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
+
+
+MIN_CODEX_VERSION = '0.163.0'
+
+
+def codex_runtime(*args, **kwargs):
+    from .bridge import CodexWorkers
+    return CodexWorkers(*args, **kwargs)
+
+
+def version_key(version):
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(-[\w.-]+)?(?:\+[\w.-]+)?', version)
+    if not match:
+        raise ValueError('Invalid agent version')
+    return (*map(int, match.group(1, 2, 3)), not bool(match[4]))
 
 
 @dataclass(frozen=True)
@@ -15,13 +33,17 @@ class AgentSpec:
     executable: str
     setup_hint: str
     installed_hint: str = ''
+    minimum_version: str | None = None
+    runtime_factory: Callable | None = None
 
 
 AGENT_SPECS = (
     AgentSpec(
         agent_id='codex', name='Codex', executable='codex',
-        setup_hint='Install Codex and run codex login before using it with Moska.',
+        setup_hint=f'Install Codex {MIN_CODEX_VERSION} or newer and run codex login before using it with Moska.',
         installed_hint="Run codex login first if you haven't already.",
+        minimum_version=MIN_CODEX_VERSION,
+        runtime_factory=codex_runtime,
     ),
 )
 
@@ -30,21 +52,54 @@ AGENT_SPECS = (
 class DetectedAgent:
     spec: AgentSpec
     path: str | None
+    version: str | None = None
 
     @property
     def available(self):
-        return self.path is not None
+        if self.path is None:
+            return False
+        if self.spec.minimum_version is None:
+            return True
+        try:
+            return self.version is not None and version_key(self.version) >= version_key(self.spec.minimum_version)
+        except ValueError:
+            return False
 
     @property
     def hint(self):
-        if not self.available:
+        if self.path is None:
             return self.spec.setup_hint
-        return f'Installed at {self.path}. {self.spec.installed_hint}'.strip()
+        if not self.available:
+            return (f'{self.spec.name} {self.version or "version unknown"}; requires '
+                    f'{self.spec.minimum_version} or newer. Update Codex, then run codex login.')
+        version = f' ({self.version})' if self.version else ''
+        return f'Installed{version} at {self.path}. {self.spec.installed_hint}'.strip()
 
 
 def scan_agents(specs=AGENT_SPECS):
-    """Only inspect PATH; do not launch agents or read their credentials."""
-    return [DetectedAgent(spec, shutil.which(spec.executable)) for spec in specs]
+    """Inspect PATH and bounded version probes; never start an agent or read credentials."""
+    found = []
+    for spec in specs:
+        path = shutil.which(spec.executable)
+        version = None
+        if path and spec.minimum_version:
+            try:
+                result = subprocess.run([path, '--version'], capture_output=True, text=True,
+                                        timeout=3, check=True)
+                match = re.search(r'\b(\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?)\b', result.stdout)
+                version = match[1] if match else None
+            except (OSError, subprocess.SubprocessError):
+                pass
+        found.append(DetectedAgent(spec, path, version))
+    return found
+
+
+def require_codex():
+    entry = scan_agents((AGENT_SPECS[0],))[0]
+    if not entry.available:
+        from .codex import CodexError
+        raise CodexError(entry.hint)
+    return entry.path
 
 
 class AgentSettingsError(Exception):
