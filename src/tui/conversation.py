@@ -4,11 +4,53 @@ import asyncio
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage
+from prompt_toolkit.history import InMemoryHistory
 
 from .progress import ProgressCallbacks, ResponseProgress
 
 
 class Conversation:
+    async def new_session(self):
+        self.restart_response = False
+        self.activity = 'saving memory…'
+        if self.worker_runtime:
+            self.worker_runtime.suspend_starts(True)
+        try:
+            running = self.task
+            if running and not running.done():
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+            if self.worker_runtime:
+                await self.worker_runtime.interrupt_all()
+            if self.prepare_turn:
+                await self.prepare_turn(self.agent, self.config)
+            self.refresh_progress()
+            thread = str(uuid4())
+            if self.session:
+                self.session.start_new(thread, self.demo_mode)
+            self.config = {'configurable': {'thread_id': thread}}
+            self.pending_messages.clear()
+            self.responding = False
+            self.task = None
+            self.fragments.clear()
+            self.progress.clear()
+            self.follow_output = True
+            self.cursor_line = 0
+            self.transcript.anchor = self.transcript.end = None
+            self.transcript.dragging = False
+            self.transcript.snapshot = ''
+            self.composer.buffer.history = InMemoryHistory()
+            self.composer.buffer.reset()
+            self.add('system', 'New session started. Previous memory saved.' if self.session
+                     else 'New session started.')
+        except Exception as error:
+            self.add('system', f'Could not start a new session: {error}')
+        finally:
+            if self.worker_runtime:
+                self.worker_runtime.suspend_starts(False)
+            self.activity = self.idle_activity
+            self.app.invalidate()
+
     def submit_message(self, text):
         self.follow_output = True
         self.add('you', text)

@@ -109,6 +109,20 @@ class SessionStore:
         return [(row_id, kind, json.loads(payload)) for row_id, kind, payload in
                 self.connection.execute('SELECT id,kind,payload FROM session_transcript ORDER BY id')]
 
+    def start_new(self, thread_id, demo_mode):
+        """Keep old checkpoints/history and atomically select a fresh memory."""
+        previous = {key: self.meta(key) for key in
+                    ('thread_id', 'thread_ids', 'demo_mode', 'pending_messages')}
+        mode = 'demo' if demo_mode else 'real'
+        with self.connection:
+            self.connection.execute(
+                'INSERT INTO session_transcript(kind,payload) VALUES (?,?)',
+                ('new_session', self._json({'previous': previous, 'thread_id': thread_id})))
+            for key, value in {'thread_id': thread_id, 'thread_ids': {mode: thread_id},
+                               'demo_mode': demo_mode, 'pending_messages': []}.items():
+                self.connection.execute('INSERT OR REPLACE INTO session_meta VALUES (?,?)',
+                                        (key, self._json(value)))
+
     def save_worker(self, runtime, kind, identifier, payload):
         with self.connection:
             self.connection.execute('INSERT OR REPLACE INTO session_workers VALUES (?,?,?,?)',

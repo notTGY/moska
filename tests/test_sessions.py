@@ -52,6 +52,58 @@ class SessionStorageTests(unittest.TestCase):
 
 
 class SessionResumeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_command_preserves_old_memory_and_reopens_blank_session(self):
+        from test_conversation import SteerModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            connection = SimpleNamespace(current_account=lambda: None)
+            with patch('adapters.providers.registry.OpenAIConnection', return_value=connection):
+                async with OrchestratorRuntime(workspace, data_dir=workspace / 'data') as runtime:
+                    model = SteerModel()
+                    agent = create_agent(model, checkpointer=runtime.memory)
+                    with create_pipe_input() as pipe:
+                        ui = ChatUI(agent, session=runtime.session, prepare_turn=runtime.prepare_turn,
+                                    worker_runtime=runtime.workers, input=pipe, output=DummyOutput())
+                        old = ui.config
+                        runtime.session.set_meta('thread_ids', {'demo': old['configurable']['thread_id'],
+                                                                'real': 'old-real-memory'})
+                        app = asyncio.create_task(ui.app.run_async())
+                        try:
+                            await asyncio.sleep(.05)
+                            pipe.send_text('remember old memory\r')
+                            await asyncio.wait_for(model.started.wait(), 2)
+                            pipe.send_text('/new\r')
+                            for _ in range(200):
+                                if ui.config != old and ui.stop_task.done():
+                                    break
+                                await asyncio.sleep(.01)
+                            fresh = ui.config
+                            self.assertNotEqual(fresh, old)
+                            self.assertFalse((await agent.aget_state(fresh)).values)
+                            self.assertEqual(ui.pending_messages, [])
+                            self.assertEqual(runtime.session.meta('pending_messages'), [])
+                            self.assertNotIn('real', runtime.session.meta('thread_ids'))
+                            self.assertFalse(ui.progress)
+                            self.assertNotIn('remember old memory', ''.join(f[1] for f in ui.fragments))
+                            self.assertEqual(ui.composer.buffer.history.get_strings(), [])
+                            self.assertIn('remember old memory', json.dumps(runtime.session.export()))
+                        finally:
+                            ui.app.exit()
+                            await asyncio.wait_for(app, 2)
+                async with OrchestratorRuntime(workspace, data_dir=workspace / 'data') as runtime:
+                    model = SteerModel(block_first=False)
+                    agent = create_agent(model, checkpointer=runtime.memory)
+                    with create_pipe_input() as pipe:
+                        ui = ChatUI(agent, session=runtime.session, prepare_turn=runtime.prepare_turn,
+                                    input=pipe, output=DummyOutput())
+                        self.assertEqual(ui.config, fresh)
+                        self.assertNotIn('remember old memory', ''.join(f[1] for f in ui.fragments))
+                        self.assertEqual((await agent.aget_state(old)).values['messages'][0].text,
+                                         'remember old memory')
+                        await ui.respond('fresh request')
+                        self.assertEqual(model.requests[-1], ['fresh request'])
+
     async def test_exact_graph_and_mock_workers_survive_reopening(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

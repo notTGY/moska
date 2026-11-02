@@ -49,6 +49,7 @@ COMMANDS = {
     "/model": "Choose model and reasoning effort",
     "/help": "Show commands and demo information",
     "/clear": "Clear the visible conversation",
+    "/new": "Save current memory and start a blank session",
     "/exit": "Exit moska",
 }
 
@@ -120,7 +121,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
             busy = self.task and not self.task.done()
             if self.stop_task and not self.stop_task.done() and text not in ('/exit', '/ps', '/help'):
                 return
-            if busy and text not in ('/exit', '/ps', '/stop', '/help') and (text.startswith('/') or not self.responding):
+            if busy and text not in ('/exit', '/ps', '/stop', '/help', '/new') and (text.startswith('/') or not self.responding):
                 return
             buffer.append_to_history()
             buffer.reset()
@@ -130,6 +131,8 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
                 self.show_processes()
             elif text == "/stop":
                 self.stop_task = event.app.create_background_task(self.stop_workers())
+            elif text == "/new":
+                self.stop_task = event.app.create_background_task(self.new_session())
             elif text == "/clear":
                 if self.session:
                     self.session.append('clear', {})
@@ -350,7 +353,10 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
     def restore_session(self):
         self._restoring = True
         try:
-            for row, kind, payload in self.session.transcript():
+            transcript = self.session.transcript()
+            start = next((index + 1 for index in range(len(transcript) - 1, -1, -1)
+                          if transcript[index][1] == 'new_session'), 0)
+            for row, kind, payload in transcript[start:]:
                 if kind == 'message':
                     self.add(payload['role'], payload['text'])
                     if payload['role'] == 'you':
