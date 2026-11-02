@@ -1,5 +1,7 @@
 # moska
 
+![screenshot](./docs/screenshot.png)
+
 Control multiple agents from one terminal orchestrator.
 
 Build with [uv](https://docs.astral.sh/uv/):
