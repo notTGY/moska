@@ -200,10 +200,6 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
             self.scroll_transcript(10)
 
         body = HSplit([
-            Window(FormattedTextControl([
-                ("class:brand", "  moska"),
-                ("class:accent", "  /  local agent workspace"),
-            ]), height=2),
             VSplit([Window(width=2), Window(self.transcript, wrap_lines=True), Window(width=2)]),
             Window(height=1),
             CompletionsMenu(max_height=5),
