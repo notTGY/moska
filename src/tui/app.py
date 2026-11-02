@@ -227,7 +227,7 @@ class ChatUI(ConfigurationDialogs, Conversation, WorkerCommands):
             key_bindings=keys, full_screen=True, mouse_support=True,
             # AIRI palette: printed hex values in AIJ_Demo_color_theme.png.
             style=Style.from_dict({
-                "": "bg:#161c27 #ffffff",
+                "": "bg:default #ffffff",
                 "brand": "#2fbead bold",
                 "accent": "#84e0d5",
                 "muted": "#909393",

@@ -33,7 +33,7 @@ class ThemeTests(unittest.TestCase):
 
     def test_airi_canvas_and_accents_are_applied_to_application(self):
         canvas = self.attrs('')
-        self.assertEqual((canvas.color, canvas.bgcolor), ('ffffff', '161c27'))
+        self.assertEqual((canvas.color, canvas.bgcolor), ('ffffff', 'default'))
         for role, color in (
             ('brand', '2fbead'), ('agent', '3debcb'), ('moska', '2fbead'),
             ('you', 'd1a684'), ('tool', '92c7ff'), ('agents', '92c7ff'),
@@ -48,7 +48,7 @@ class ThemeTests(unittest.TestCase):
             with self.subTest(role=role):
                 attrs = self.attrs('class:' + role)
                 self.assertEqual(attrs.color, color)
-                self.assertGreaterEqual(contrast(attrs.color, attrs.bgcolor), 4.5)
+                self.assertEqual(attrs.bgcolor, 'default')
         self.assertTrue(self.attrs('class:brand').bold)
         self.assertTrue(self.attrs('class:link').underline)
         self.assertTrue(self.attrs('class:markdown-quote').italic)
@@ -79,7 +79,6 @@ class ThemeTests(unittest.TestCase):
             ('class:markdown-code class:selected-text', '005a60'),
             ('class:link class:selected-text', '005a60'),
             ('class:dialog,dialog.body class:frame.label', '005a60'),
-            ('class:muted', '161c27'),
         ):
             with self.subTest(classes=classes):
                 attrs = self.attrs(classes)
@@ -117,7 +116,7 @@ class ThemeTests(unittest.TestCase):
                 style = next(fragment[0] for fragment in fragments if fragment[1] == text)
                 attrs = self.attrs(style)
                 self.assertEqual((attrs.color, attrs.bold, attrs.italic), (color, bold, italic))
-                self.assertGreaterEqual(contrast(attrs.color, attrs.bgcolor), 4.5)
+                self.assertEqual(attrs.bgcolor, 'default')
                 selected = self.attrs(style + ' class:selected-text')
                 self.assertEqual((selected.color, selected.bgcolor), ('ffffff', '005a60'))
                 self.assertFalse(selected.reverse)
