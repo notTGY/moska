@@ -18,9 +18,3 @@ moska
 ```
 
 Requires Python 3.13+; uv can install it automatically. Run `uv tool update-shell` if `moska` is not on your PATH.
-
-Use `/new` to save the current memory and start a blank session. This stops active
-work and clears the chat and model context while keeping your model and agent
-settings. Previous conversations and checkpoints remain in the workspace's session
-database; reopening Moska resumes the new session. `moska --export-session FILE`
-exports the saved conversation history as JSON. `/clear` only clears the visible chat.
